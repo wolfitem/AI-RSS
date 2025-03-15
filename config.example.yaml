@@ -1,0 +1,26 @@
+# 日志配置
+logger:
+  level: "error"           # 日志级别: debug, info, warn, error, dpanic, panic, fatal
+  console: true           # 是否输出到控制台
+  file_path: "logs/ai-rss.log" # 日志文件路径
+  max_size: 100           # 单个日志文件最大大小，单位MB
+  max_backups: 3          # 最多保留的旧日志文件数量
+  max_age: 28             # 保留日志文件的最大天数
+  compress: true          # 是否压缩旧日志文件
+
+# Deepseek API配置
+deepseek:
+  api_key: "sk-************"
+  model: "deepseek-chat"
+  max_tokens: 2000
+  max_calls: 300           # API最大调用次数，超过此次数将直接返回原始数据
+
+# 输出配置
+output:
+  format: "markdown"
+  include_metadata: true
+
+# RSS获取配置
+rss:
+  days_back: 3            # 获取几天内的文章，默认为3天
+  opml_file: "example.opml"  # OPML文件路径

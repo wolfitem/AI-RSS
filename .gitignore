@@ -1,0 +1,39 @@
+# 编译生成的二进制文件
+/bin/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# 测试二进制文件
+*.test
+
+# 覆盖率工具生成的文件
+*.out
+*.prof
+
+# 依赖目录
+/vendor/
+
+# IDE 文件
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# 日志文件
+/logs/
+*.log
+
+# 本地配置文件，可能包含敏感信息
+config.yaml
+rss.opml 
+report-*.md
+
+# 操作系统文件
+.DS_Store
+Thumbs.db
+
+# Go工作区文件
+go.work
