@@ -5,7 +5,7 @@
 *.dll
 *.so
 *.dylib
-
+ai-rss
 # 测试二进制文件
 *.test
 
@@ -30,6 +30,7 @@
 config.yaml
 rss.opml 
 report-*.md
+*.db
 
 # 操作系统文件
 .DS_Store

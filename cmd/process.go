@@ -36,8 +36,13 @@ var processCmd = &cobra.Command{
 				Model:     viper.GetString("deepseek.model"),
 				MaxTokens: viper.GetInt("deepseek.max_tokens"),
 				MaxCalls:  viper.GetInt("deepseek.max_calls"),
+				APIUrl:    viper.GetString("deepseek.api_url"),
 			},
 			PromptTemplate: viper.GetString("analysis.prompt_template"),
+			DatabaseConfig: model.DatabaseConfig{
+				Enabled:  viper.GetBool("database.enabled"),
+				FilePath: viper.GetString("database.file_path"),
+			},
 		}
 
 		// 处理OPML文件

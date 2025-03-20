@@ -7,6 +7,7 @@ type ProcessParams struct {
 	DaysBack       int            // 获取几天内的文章
 	DeepseekConfig DeepseekConfig // Deepseek API配置
 	PromptTemplate string         // 提示词模板
+	DatabaseConfig DatabaseConfig // 数据库配置
 }
 
 // DeepseekConfig 包含Deepseek API的配置信息
@@ -15,6 +16,13 @@ type DeepseekConfig struct {
 	Model     string // 模型名称
 	MaxTokens int    // 最大令牌数
 	MaxCalls  int    // 最大调用次数
+	APIUrl    string // API接口地址
+}
+
+// DatabaseConfig 包含数据库的配置信息
+type DatabaseConfig struct {
+	Enabled  bool   // 是否启用数据库
+	FilePath string // 数据库文件路径
 }
 
 // RssSource 表示一个RSS源

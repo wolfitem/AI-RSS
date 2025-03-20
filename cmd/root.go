@@ -3,6 +3,8 @@ package cmd
 import (
 	"fmt"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -23,6 +25,9 @@ var rootCmd = &cobra.Command{
 // Execute adds all child commands to the root command and sets flags appropriately.
 // This is called by main.main(). It only needs to happen once to the rootCmd.
 func Execute() {
+	// 设置信号处理
+	setupSignalHandler()
+
 	err := rootCmd.Execute()
 	if err != nil {
 		fmt.Println(err)
@@ -82,4 +87,22 @@ func initLogger() {
 	if err := logger.Init(logConfig); err != nil {
 		fmt.Printf("初始化日志系统失败: %v\n", err)
 	}
+}
+
+// setupSignalHandler 设置信号处理函数
+func setupSignalHandler() {
+	c := make(chan os.Signal, 1)
+	// 监听 SIGINT (Ctrl+C) 和 SIGTERM 信号
+	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+
+	go func() {
+		<-c
+		fmt.Println("\n接收到中断信号，正在优雅退出...")
+		// 执行清理工作
+		logger.Info("程序接收到中断信号，正在清理资源")
+		// 同步日志
+		logger.Sync()
+		// 退出程序
+		os.Exit(0)
+	}()
 }

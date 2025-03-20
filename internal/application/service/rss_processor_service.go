@@ -2,6 +2,7 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/wolfitem/ai-rss/internal/domain/model"
 	"github.com/wolfitem/ai-rss/internal/domain/service"
+	"github.com/wolfitem/ai-rss/internal/infrastructure/database"
 	"github.com/wolfitem/ai-rss/internal/infrastructure/logger"
 )
 
@@ -27,6 +29,9 @@ type rssProcessorService struct {
 	rssService service.RssService
 	// 用于跟踪API调用次数的变量
 	apiCallCount int
+	// 数据库相关
+	db          database.Database
+	articleRepo database.ArticleRepository
 }
 
 // NewRssProcessorService 创建一个新的RSS处理器服务实例
@@ -42,6 +47,20 @@ func NewRssProcessorService() RssProcessorService {
 func (s *rssProcessorService) ProcessRss(params model.ProcessParams) (string, error) {
 	logger.Info("开始处理RSS源", "opml_file", params.OpmlFile, "days_back", params.DaysBack)
 	defer logger.TimeTrack("ProcessRss")()
+
+	// 初始化数据库（如果启用）
+	if params.DatabaseConfig.Enabled {
+		if err := s.initDatabase(params.DatabaseConfig); err != nil {
+			logger.Error("初始化数据库失败", "error", err)
+			return "", fmt.Errorf("初始化数据库失败: %w", err)
+		}
+		// 确保在函数结束时关闭数据库连接
+		defer func() {
+			if s.db != nil {
+				s.db.Close()
+			}
+		}()
+	}
 
 	// 1. 解析OPML文件获取RSS源列表
 	logger.Debug("开始解析OPML文件", "file", params.OpmlFile)
@@ -75,7 +94,18 @@ func (s *rssProcessorService) ProcessRss(params model.ProcessParams) (string, er
 		return "", fmt.Errorf("分析文章失败: %w", err)
 	}
 
-	// 5. 生成报告
+	// 5. 保存分析结果到数据库（如果启用）
+	if params.DatabaseConfig.Enabled && s.articleRepo != nil {
+		logger.Info("开始保存分析结果到数据库", "results_count", len(analysisResults))
+		for _, result := range analysisResults {
+			if err := s.articleRepo.SaveArticle(result); err != nil {
+				logger.Error("保存文章到数据库失败", "title", result.Title, "error", err)
+				// 继续处理其他文章，不中断流程
+			}
+		}
+	}
+
+	// 6. 生成报告
 	logger.Info("开始生成报告", "results_count", len(analysisResults))
 	report := s.generateReport(analysisResults, params.DaysBack)
 
@@ -94,6 +124,26 @@ func (s *rssProcessorService) analyzeArticles(articles []model.Article, params m
 		if article.Content == "" {
 			logger.Warn("文章内容为空，跳过处理", "title", article.Title)
 			continue
+		}
+
+		// 如果启用了数据库，检查文章是否已存在
+		if params.DatabaseConfig.Enabled && s.articleRepo != nil {
+			exists, err := s.articleRepo.ArticleExists(article.Link)
+			if err != nil {
+				logger.Error("检查文章是否存在失败", "title", article.Title, "error", err)
+				// 继续处理，不中断流程
+			} else if exists {
+				logger.Info("文章已存在于数据库中，跳过处理", "title", article.Title, "link", article.Link)
+				// 从数据库获取已存在的文章
+				existingArticle, err := s.articleRepo.GetArticleByLink(article.Link)
+				if err == nil && existingArticle != nil {
+					// 添加到结果中
+					results = append(results, *existingArticle)
+					logger.Info("已从数据库获取文章", "title", existingArticle.Title)
+					continue
+				}
+				// 如果获取失败，继续正常处理
+			}
 		}
 
 		result := model.AnalysisResult{
@@ -140,31 +190,6 @@ func (s *rssProcessorService) processArticleContent(article model.Article, confi
 	return content
 }
 
-// prepareAnalysisPrompt 准备用于分析的提示词
-func (s *rssProcessorService) prepareAnalysisPrompt(articleTexts []string, promptTemplate string) string {
-	// 如果没有提供自定义提示词模板，使用默认模板
-	if promptTemplate == "" {
-		return fmt.Sprintf(`请分析以下%d篇文章，并为每篇文章提供以下信息：
-1. 标题（保持原标题）
-2. 内容摘要（100字以内）
-3. 分类（根据内容确定合适的分类）
-
-请以JSON数组格式返回结果，每篇文章对应一个对象，包含title、summary、source、pubDate、category和link字段。
-
-文章内容如下：
-
-%s`,
-			len(articleTexts), strings.Join(articleTexts, "---\n"))
-	}
-
-	// 使用自定义提示词模板，替换占位符
-	prompt := strings.ReplaceAll(promptTemplate, "{{articles_count}}", fmt.Sprintf("%d", len(articleTexts)))
-	prompt = strings.ReplaceAll(prompt, "{{articles_content}}", strings.Join(articleTexts, "---\n"))
-
-	logger.Debug("已准备分析提示词", "prompt_length", len(prompt))
-	return prompt
-}
-
 // summarizeContent 使用Deepseek API对内容进行摘要
 func (s *rssProcessorService) summarizeContent(content string, config model.DeepseekConfig) (string, error) {
 	// 准备提示词
@@ -205,10 +230,15 @@ func (s *rssProcessorService) callDeepseekAPI(prompt string, config model.Deepse
 		"max_tokens", config.MaxTokens,
 		"api_key", apiKeyMasked,
 		"prompt_length", len(prompt))
-	logger.Debug("Deepseek API提示词", "prompt_preview", truncateString(prompt, 2000))
+	logger.Debug("Deepseek API提示词", "prompt_preview", prompt)
 
 	// 准备请求URL和请求体
-	apiURL := "https://api.deepseek.com/v1/chat/completions"
+	apiURL := config.APIUrl
+	// 如果配置中的API URL为空，则使用默认值
+	if apiURL == "" {
+		apiURL = "https://api.deepseek.com/v1/chat/completions"
+		logger.Warn("未配置Deepseek API URL，使用默认值", "default_url", apiURL)
+	}
 	requestBody := map[string]interface{}{
 		"model": config.Model,
 		"messages": []map[string]string{
@@ -235,10 +265,16 @@ func (s *rssProcessorService) callDeepseekAPI(prompt string, config model.Deepse
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+config.APIKey)
 
-	// 发送请求
-	client := &http.Client{Timeout: 60 * time.Second}
-	logger.Debug("发送Deepseek API请求", "url", apiURL)
+	// 发送请求，使用更短的超时时间
+	client := &http.Client{Timeout: 60 * time.Second} // 将超时从60秒减少到30秒
+	logger.Debug("发送Deepseek API请求", "url", apiURL, "timeout", "60s")
 	start := time.Now()
+
+	// 添加上下文超时控制
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	req = req.WithContext(ctx)
+
 	resp, err := client.Do(req)
 	requestDuration := time.Since(start)
 	logger.Debug("Deepseek API请求耗时", "duration_ms", requestDuration.Milliseconds())
@@ -249,11 +285,30 @@ func (s *rssProcessorService) callDeepseekAPI(prompt string, config model.Deepse
 	}
 	defer resp.Body.Close()
 
-	// 读取响应
-	responseBody, err := io.ReadAll(resp.Body)
-	if err != nil {
+	// 读取响应，添加超时控制
+	responseBodyChan := make(chan []byte, 1)
+	readErrChan := make(chan error, 1)
+
+	go func() {
+		responseBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			readErrChan <- err
+			return
+		}
+		responseBodyChan <- responseBody
+	}()
+
+	// 等待读取完成或超时
+	var responseBody []byte
+	select {
+	case responseBody = <-responseBodyChan:
+		// 读取成功
+	case err = <-readErrChan:
 		logger.Error("读取API响应失败", "error", err)
 		return "", fmt.Errorf("读取API响应失败: %w", err)
+	case <-time.After(10 * time.Second):
+		logger.Error("读取API响应超时")
+		return "", fmt.Errorf("读取API响应超时")
 	}
 
 	// 检查响应状态码
@@ -263,7 +318,7 @@ func (s *rssProcessorService) callDeepseekAPI(prompt string, config model.Deepse
 	}
 
 	// 记录原始响应内容
-	logger.Debug("Deepseek API原始响应", "response_length", len(responseBody), "response_preview", truncateString(string(responseBody), 5000))
+	logger.Debug("Deepseek API原始响应", "response_length", len(responseBody), "response_preview", string(responseBody))
 
 	// 解析响应JSON
 	var response map[string]interface{}
@@ -371,43 +426,6 @@ func (s *rssProcessorService) generateReport(results []model.AnalysisResult, day
 	return report
 }
 
-// buildAnalysisResult 将文章内容转换为分析结果结构
-func (s *rssProcessorService) buildAnalysisResult(articles []model.Article) ([]model.AnalysisResult, error) {
-	logger.Info("开始构建分析结果", "articles_count", len(articles))
-	var results []model.AnalysisResult
-
-	// 遍历每篇文章，构建分析结果
-	for _, article := range articles {
-		// 跳过内容为空的文章
-		if article.Content == "" {
-			logger.Warn("文章内容为空，跳过处理", "title", article.Title)
-			continue
-		}
-
-		// 创建分析结果
-		result := model.AnalysisResult{
-			Title:    article.Title,
-			Summary:  article.Content, // 内容已在之前的处理中被摘要
-			Source:   article.Source.Title,
-			PubDate:  article.PublishDate,
-			Category: "未分类", // 默认分类
-			Link:     article.Link,
-		}
-
-		// 尝试从内容中提取分类信息
-		category := s.extractCategoryFromContent(article.Content)
-		if category != "" {
-			result.Category = category
-		}
-
-		results = append(results, result)
-		logger.Debug("已构建分析结果", "title", result.Title, "category", result.Category, "cotent_length", len(result.Summary))
-	}
-
-	logger.Info("分析结果构建完成", "results_count", len(results))
-	return results, nil
-}
-
 // extractCategoryFromContent 从内容中提取分类信息
 func (s *rssProcessorService) extractCategoryFromContent(content string) string {
 	// 使用正则表达式尝试提取分类信息
@@ -447,83 +465,26 @@ func (s *rssProcessorService) extractCategoryFromContent(content string) string 
 	return ""
 }
 
-// extractResultsFromText 从文本中提取分析结果
-func (s *rssProcessorService) extractResultsFromText(text string, articles []model.Article) []model.AnalysisResult {
-	var results []model.AnalysisResult
+// initDatabase 初始化数据库
+func (s *rssProcessorService) initDatabase(config model.DatabaseConfig) error {
+	logger.Info("初始化数据库", "enabled", config.Enabled, "file_path", config.FilePath)
 
-	// 使用正则表达式提取标题和摘要
-	titleRegex := regexp.MustCompile(`(?m)^(?:标题|Title)[:：]\s*(.+)$`)
-	summaryRegex := regexp.MustCompile(`(?m)^(?:摘要|Summary)[:：]\s*(.+)$`)
-	categoryRegex := regexp.MustCompile(`(?m)^(?:分类|Category)[:：]\s*(.+)$`)
-
-	titleMatches := titleRegex.FindAllStringSubmatch(text, -1)
-	summaryMatches := summaryRegex.FindAllStringSubmatch(text, -1)
-	categoryMatches := categoryRegex.FindAllStringSubmatch(text, -1)
-
-	// 确保至少有标题匹配
-	if len(titleMatches) == 0 {
-		logger.Warn("无法从文本中提取标题信息")
-		return results
+	if !config.Enabled {
+		logger.Info("数据库功能未启用，跳过初始化")
+		return nil
 	}
 
-	// 提取结果
-	for i, titleMatch := range titleMatches {
-		if len(titleMatch) < 2 {
-			continue
-		}
+	// 创建数据库实例
+	s.db = database.NewSQLiteDatabase(config.FilePath)
 
-		title := titleMatch[1]
-
-		// 尝试匹配对应的摘要和分类
-		summary := ""
-		if i < len(summaryMatches) && len(summaryMatches[i]) >= 2 {
-			summary = summaryMatches[i][1]
-		}
-
-		category := "未分类"
-		if i < len(categoryMatches) && len(categoryMatches[i]) >= 2 {
-			category = categoryMatches[i][1]
-		}
-
-		// 查找对应的原始文章以获取链接和来源信息
-		var link, source, pubDate string
-		for _, article := range articles {
-			if strings.EqualFold(article.Title, title) {
-				link = article.Link
-				source = article.Source.Title
-				pubDate = article.PublishDate
-				break
-			}
-		}
-
-		// 创建分析结果
-		result := model.AnalysisResult{
-			Title:    title,
-			Summary:  summary,
-			Category: category,
-			Source:   source,
-			PubDate:  pubDate,
-			Link:     link,
-		}
-
-		results = append(results, result)
+	// 初始化数据库
+	if err := s.db.Init(); err != nil {
+		logger.Error("初始化数据库失败", "error", err)
+		return fmt.Errorf("初始化数据库失败: %w", err)
 	}
 
-	return results
-}
-
-// min 返回两个整数中的较小值
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
-// truncateString 截断字符串，用于日志输出预览内容
-func truncateString(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
-	}
-	return s[:maxLen] + "..."
+	// 创建文章存储库
+	s.articleRepo = database.NewSQLiteArticleRepository(s.db)
+	logger.Info("数据库和文章存储库初始化成功")
+	return nil
 }

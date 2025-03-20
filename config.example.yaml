@@ -14,6 +14,7 @@ deepseek:
   model: "deepseek-chat"
   max_tokens: 2000
   max_calls: 300           # API最大调用次数，超过此次数将直接返回原始数据
+  api_url: "https://api.deepseek.com/v1/chat/completions"  # API接口地址
 
 # 输出配置
 output:
@@ -24,3 +25,8 @@ output:
 rss:
   days_back: 3            # 获取几天内的文章，默认为3天
   opml_file: "example.opml"  # OPML文件路径
+
+# 数据库配置
+database:
+  enabled: true           # 是否启用数据库存储
+  file_path: "data/articles.db"  # 数据库文件路径
