@@ -28,13 +28,14 @@ func Execute() {
 	// 设置信号处理
 	setupSignalHandler()
 
+	// 程序退出前同步日志
+	defer logger.Sync()
+
 	err := rootCmd.Execute()
 	if err != nil {
 		fmt.Println(err)
 		os.Exit(1)
 	}
-	// 程序退出前同步日志
-	defer logger.Sync()
 }
 
 func init() {
@@ -42,6 +43,20 @@ func init() {
 
 	// 全局标志
 	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "配置文件路径 (默认为 ./config.yaml)")
+	rootCmd.PersistentFlags().BoolP("version", "v", false, "显示版本信息")
+
+	// 添加版本标志的处理
+	rootCmd.PersistentPreRun = func(cmd *cobra.Command, args []string) {
+		showVersion, _ := cmd.Flags().GetBool("version")
+		if showVersion {
+			// 如果 Version 为空，则显示开发版本
+			if Version == "" {
+				Version = "开发版本"
+			}
+			fmt.Printf("AI-RSS 版本: %s\n", Version)
+			os.Exit(0)
+		}
+	}
 }
 
 // initConfig reads in config file and ENV variables if set.
@@ -89,19 +104,24 @@ func initLogger() {
 	}
 }
 
-// setupSignalHandler 设置信号处理函数
+// setupSignalHandler 设置信号处理，捕获Ctrl+C（SIGINT）和SIGTERM信号
 func setupSignalHandler() {
 	c := make(chan os.Signal, 1)
-	// 监听 SIGINT (Ctrl+C) 和 SIGTERM 信号
-	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
+	// 监听SIGINT（Ctrl+C）和SIGTERM信号
+	signal.Notify(c, syscall.SIGINT, syscall.SIGTERM)
 
+	// 在后台协程中处理信号
 	go func() {
-		<-c
-		fmt.Println("\n接收到中断信号，正在优雅退出...")
-		// 执行清理工作
-		logger.Info("程序接收到中断信号，正在清理资源")
+		sig := <-c
+		logger.Info("接收到信号，准备退出程序", "signal", sig)
+		fmt.Printf("\n接收到信号 %s，正在退出程序...\n", sig)
+
+		// 在这里可以添加清理资源的代码
+		// 例如关闭数据库连接、保存状态等
+
 		// 同步日志
 		logger.Sync()
+
 		// 退出程序
 		os.Exit(0)
 	}()
