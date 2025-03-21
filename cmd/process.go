@@ -27,6 +27,17 @@ var processCmd = &cobra.Command{
 		// 创建应用服务
 		appService := service.NewRssProcessorService()
 
+		// 获取RSS配置，设置默认值
+		timeout := viper.GetInt("rss.timeout")
+		if timeout <= 0 {
+			timeout = 30 // 默认30秒
+		}
+
+		concurrency := viper.GetInt("rss.concurrency")
+		if concurrency <= 0 {
+			concurrency = 5 // 默认5个并发
+		}
+
 		params := model.ProcessParams{
 			OpmlFile:   viper.GetString("rss.opml_file"),
 			OutputFile: outputFile,
@@ -42,6 +53,10 @@ var processCmd = &cobra.Command{
 			DatabaseConfig: model.DatabaseConfig{
 				Enabled:  viper.GetBool("database.enabled"),
 				FilePath: viper.GetString("database.file_path"),
+			},
+			RssConfig: model.RssConfig{
+				Timeout:     timeout,
+				Concurrency: concurrency,
 			},
 		}
 

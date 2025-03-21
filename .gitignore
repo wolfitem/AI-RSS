@@ -29,8 +29,12 @@ ai-rss
 # 本地配置文件，可能包含敏感信息
 config.yaml
 rss.opml 
+
+# 报告文件
 report-*.md
-*.db
+
+#数据文件
+articles.db
 
 # 操作系统文件
 .DS_Store

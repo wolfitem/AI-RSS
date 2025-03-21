@@ -3,8 +3,8 @@ logger:
   level: "error"           # 日志级别: debug, info, warn, error, dpanic, panic, fatal
   console: true           # 是否输出到控制台
   file_path: "logs/ai-rss.log" # 日志文件路径
-  max_size: 100           # 单个日志文件最大大小，单位MB
-  max_backups: 3          # 最多保留的旧日志文件数量
+  max_size: 50            # 单个日志文件最大大小，单位MB
+  max_backups: 5          # 最多保留的旧日志文件数量
   max_age: 28             # 保留日志文件的最大天数
   compress: true          # 是否压缩旧日志文件
 
@@ -25,6 +25,12 @@ output:
 rss:
   days_back: 3            # 获取几天内的文章，默认为3天
   opml_file: "example.opml"  # OPML文件路径
+  timeout: 20            # RSS源获取超时时间（秒），默认为20秒
+  concurrency: 10        # 并发获取RSS源的数量，默认为10
+  max_retries: 3         # 最大重试次数，默认为3
+  response_timeout: 10   # 响应读取超时时间（秒），默认为10秒
+  overall_timeout: 60    # 整体操作超时时间（秒），默认为60秒
+  retry_backoff_base: 1  # 重试退避基数（秒），默认为1秒
 
 # 数据库配置
 database:

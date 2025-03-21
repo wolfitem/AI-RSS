@@ -8,6 +8,7 @@ type ProcessParams struct {
 	DeepseekConfig DeepseekConfig // Deepseek API配置
 	PromptTemplate string         // 提示词模板
 	DatabaseConfig DatabaseConfig // 数据库配置
+	RssConfig      RssConfig      // RSS获取配置
 }
 
 // DeepseekConfig 包含Deepseek API的配置信息
@@ -23,6 +24,16 @@ type DeepseekConfig struct {
 type DatabaseConfig struct {
 	Enabled  bool   // 是否启用数据库
 	FilePath string // 数据库文件路径
+}
+
+// RssConfig 包含RSS获取的配置信息
+type RssConfig struct {
+	Timeout          int // RSS源获取超时时间（秒）
+	Concurrency      int // 并发获取RSS源的数量
+	MaxRetries       int // 最大重试次数
+	ResponseTimeout  int // 响应读取超时时间（秒）
+	OverallTimeout   int // 整体操作超时时间（秒）
+	RetryBackoffBase int // 重试退避基数（秒）
 }
 
 // RssSource 表示一个RSS源
@@ -42,10 +53,11 @@ type Article struct {
 
 // AnalysisResult 表示分析结果
 type AnalysisResult struct {
-	Title    string // 标题
-	Summary  string // 摘要
-	Source   string // 来源
-	PubDate  string // 发布日期
-	Category string // 分类
-	Link     string // 文章链接
+	Title         string // 标题
+	Summary       string // 摘要
+	SummaryLength int    // 摘要长度
+	Source        string // 来源
+	PubDate       string // 发布日期
+	Category      string // 分类
+	Link          string // 文章链接
 }

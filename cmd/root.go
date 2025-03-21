@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
@@ -104,11 +105,19 @@ func initLogger() {
 	}
 }
 
+// 内存监控器实例
+var memMonitor *logger.MemStatsMonitor
+
 // setupSignalHandler 设置信号处理，捕获Ctrl+C（SIGINT）和SIGTERM信号
 func setupSignalHandler() {
 	c := make(chan os.Signal, 1)
 	// 监听SIGINT（Ctrl+C）和SIGTERM信号
 	signal.Notify(c, syscall.SIGINT, syscall.SIGTERM)
+
+	// 启动内存监控
+	memMonitor = logger.NewMemStatsMonitor(30 * time.Second) // 每30秒记录一次内存使用情况
+	memMonitor.Start()
+	logger.Info("内存监控已启动", "interval_seconds", 30)
 
 	// 在后台协程中处理信号
 	go func() {
@@ -116,8 +125,14 @@ func setupSignalHandler() {
 		logger.Info("接收到信号，准备退出程序", "signal", sig)
 		fmt.Printf("\n接收到信号 %s，正在退出程序...\n", sig)
 
-		// 在这里可以添加清理资源的代码
-		// 例如关闭数据库连接、保存状态等
+		// 停止内存监控
+		if memMonitor != nil {
+			memMonitor.Stop()
+			logger.Info("内存监控已停止")
+		}
+
+		// 记录最终内存使用情况
+		logger.LogMemStatsOnce()
 
 		// 同步日志
 		logger.Sync()

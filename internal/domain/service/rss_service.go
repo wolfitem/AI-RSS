@@ -20,7 +20,7 @@ type RssService interface {
 	ParseOpml(opmlFilePath string) ([]model.RssSource, error)
 
 	// FetchArticles 从RSS源获取文章
-	FetchArticles(sources []model.RssSource, daysBack int) ([]model.Article, error)
+	FetchArticles(sources []model.RssSource, daysBack int, config model.RssConfig) ([]model.Article, error)
 }
 
 // rssService 实现RssService接口
@@ -108,16 +108,52 @@ func stripHTMLTags(html string) string {
 }
 
 // FetchArticles 从RSS源获取文章
-func (s *rssService) FetchArticles(sources []model.RssSource, daysBack int) ([]model.Article, error) {
+func (s *rssService) FetchArticles(sources []model.RssSource, daysBack int, config model.RssConfig) ([]model.Article, error) {
 	logger.Info("开始获取RSS文章", "sources_count", len(sources), "days_back", daysBack)
 	defer logger.TimeTrack("FetchArticles")()
+
+	// 设置配置，使用传入的配置或默认值
+	timeout := 15
+	concurrency := 3
+	maxRetries := 3
+	responseTimeout := 10
+	overallTimeout := 60
+	retryBackoffBase := 1
+
+	// 使用传入的配置值（如果有）
+	if config.Timeout > 0 {
+		timeout = config.Timeout
+	}
+	if config.Concurrency > 0 {
+		concurrency = config.Concurrency
+	}
+	if config.MaxRetries > 0 {
+		maxRetries = config.MaxRetries
+	}
+	if config.ResponseTimeout > 0 {
+		responseTimeout = config.ResponseTimeout
+	}
+	if config.OverallTimeout > 0 {
+		overallTimeout = config.OverallTimeout
+	}
+	if config.RetryBackoffBase > 0 {
+		retryBackoffBase = config.RetryBackoffBase
+	}
+
+	// 记录使用的配置值
+	logger.Info("使用超时时间", "timeout_seconds", timeout)
+	logger.Info("使用并发数量", "concurrency", concurrency)
+	logger.Info("使用最大重试次数", "max_retries", maxRetries)
+	logger.Info("使用响应超时时间", "response_timeout_seconds", responseTimeout)
+	logger.Info("使用整体超时时间", "overall_timeout_seconds", overallTimeout)
+	logger.Info("使用重试退避基数", "retry_backoff_base_seconds", retryBackoffBase)
 
 	var articles []model.Article
 	fp := gofeed.NewParser()
 
-	// 设置更短的超时时间，避免长时间等待
+	// 设置超时时间
 	fp.Client = &http.Client{
-		Timeout: 15 * time.Second, // 从30秒减少到15秒
+		Timeout: time.Duration(timeout) * time.Second,
 	}
 
 	// 计算截止日期
@@ -133,7 +169,7 @@ func (s *rssService) FetchArticles(sources []model.RssSource, daysBack int) ([]m
 
 	resultChan := make(chan sourceResult, len(sources))
 	// 限制并发数量，避免过多的并发请求
-	semaphore := make(chan struct{}, 3) // 最多3个并发请求
+	semaphore := make(chan struct{}, concurrency) // 使用配置的并发数量
 
 	// 启动goroutine处理每个RSS源
 	for _, source := range sources {
@@ -145,8 +181,9 @@ func (s *rssService) FetchArticles(sources []model.RssSource, daysBack int) ([]m
 
 			logger.Info("开始获取RSS源", "title", src.Title, "url", src.XmlUrl)
 
-			// 添加上下文超时控制
-			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+			// 添加更长的上下文超时控制，避免慢速服务器导致的超时
+			// 使用配置的超时时间
+			ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
 			defer cancel()
 
 			// 创建带有上下文的请求
@@ -157,10 +194,11 @@ func (s *rssService) FetchArticles(sources []model.RssSource, daysBack int) ([]m
 				return
 			}
 
-			// 添加重试机制
+			// 添加更智能的重试机制，使用指数退避策略
 			var feed *gofeed.Feed
 			var fetchErr error
-			for retries := 0; retries < 3; retries++ {
+			// 使用配置的最大重试次数
+			for retries := 0; retries < maxRetries; retries++ {
 				logger.Debug("尝试解析RSS源", "title", src.Title, "url", src.XmlUrl, "attempt", retries+1)
 
 				// 使用自定义的HTTP客户端发送请求
@@ -172,18 +210,45 @@ func (s *rssService) FetchArticles(sources []model.RssSource, daysBack int) ([]m
 						"url", src.XmlUrl,
 						"attempt", retries+1,
 						"error", err)
-					if retries < 2 {
-						time.Sleep(2 * time.Second)
+					if retries < maxRetries-1 {
+						// 使用指数退避策略，每次重试等待时间翻倍
+						backoffTime := time.Duration(retryBackoffBase<<retries) * time.Second
+						logger.Info("等待重试", "backoff_time_ms", backoffTime.Milliseconds())
+						time.Sleep(backoffTime)
 					}
 					continue
 				}
 
 				// 确保响应体被关闭
 				if resp != nil {
-					defer resp.Body.Close()
+					// 使用defer和匿名函数确保响应体被正确关闭
+					respBody := resp.Body
+					defer func() {
+						if err := respBody.Close(); err != nil {
+							logger.Warn("关闭响应体失败", "error", err)
+						}
+					}()
 
-					// 解析Feed
-					feed, fetchErr = fp.Parse(resp.Body)
+					// 解析Feed，添加超时控制
+					parseChan := make(chan struct{}, 1)
+					go func() {
+						feed, fetchErr = fp.Parse(respBody)
+						parseChan <- struct{}{}
+					}()
+
+					// 等待解析完成或超时
+					select {
+					case <-parseChan:
+						// 解析完成
+						if fetchErr == nil {
+							break // 解析成功，跳出重试循环
+						}
+					case <-time.After(time.Duration(responseTimeout) * time.Second):
+						// 解析超时
+						fetchErr = fmt.Errorf("解析Feed超时")
+						logger.Warn("解析Feed超时", "title", src.Title, "url", src.XmlUrl, "timeout_seconds", responseTimeout)
+					}
+
 					if fetchErr == nil {
 						break // 解析成功，跳出重试循环
 					}
@@ -195,8 +260,11 @@ func (s *rssService) FetchArticles(sources []model.RssSource, daysBack int) ([]m
 						"error", fetchErr)
 				}
 
-				if retries < 2 {
-					time.Sleep(2 * time.Second)
+				if retries < maxRetries-1 && fetchErr != nil {
+					// 使用指数退避策略，每次重试等待时间翻倍
+					backoffTime := time.Duration(1<<retries) * time.Second
+					logger.Info("等待重试", "backoff_time_ms", backoffTime.Milliseconds())
+					time.Sleep(backoffTime)
 				}
 			}
 
@@ -261,8 +329,8 @@ func (s *rssService) FetchArticles(sources []model.RssSource, daysBack int) ([]m
 		}(source)
 	}
 
-	// 设置超时控制
-	timeout := time.After(60 * time.Second)
+	// 设置超时控制，使用配置的整体超时时间
+	timeoutChan := time.After(time.Duration(overallTimeout) * time.Second)
 
 	// 收集结果
 	resultsCount := 0
@@ -281,7 +349,7 @@ func (s *rssService) FetchArticles(sources []model.RssSource, daysBack int) ([]m
 				logger.Info("添加文章到结果集", "source", result.source.Title, "articles_count", len(result.articles))
 			}
 
-		case <-timeout:
+		case <-timeoutChan:
 			logger.Error("获取RSS源超时，已处理的源数量", "processed", resultsCount, "total", len(sources))
 			return articles, fmt.Errorf("获取RSS源超时，已处理%d/%d个源", resultsCount, len(sources))
 		}

@@ -80,6 +80,7 @@ func (s *SQLiteDatabase) createTables() error {
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		title TEXT NOT NULL,
 		summary TEXT NOT NULL,
+		summary_length INTEGER DEFAULT 0,
 		source TEXT NOT NULL,
 		pub_date TEXT NOT NULL,
 		category TEXT NOT NULL,

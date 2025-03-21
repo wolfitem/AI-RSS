@@ -46,13 +46,16 @@ func (r *SQLiteArticleRepository) SaveArticle(article model.AnalysisResult) erro
 		return nil
 	}
 
+	// 计算摘要长度
+	article.SummaryLength = len([]rune(article.Summary))
+
 	// 插入文章记录
 	query := `
-	INSERT INTO articles (title, summary, source, pub_date, category, link)
-	VALUES (?, ?, ?, ?, ?, ?)
+	INSERT INTO articles (title, summary, summary_length, source, pub_date, category, link)
+	VALUES (?, ?, ?, ?, ?, ?, ?)
 	`
 
-	_, err = r.db.Exec(query, article.Title, article.Summary, article.Source, article.PubDate, article.Category, article.Link)
+	_, err = r.db.Exec(query, article.Title, article.Summary, article.SummaryLength, article.Source, article.PubDate, article.Category, article.Link)
 	if err != nil {
 		logger.Error("保存文章失败", "error", err)
 		return fmt.Errorf("保存文章失败: %w", err)
@@ -83,11 +86,11 @@ func (r *SQLiteArticleRepository) ArticleExists(link string) (bool, error) {
 func (r *SQLiteArticleRepository) GetArticleByLink(link string) (*model.AnalysisResult, error) {
 	logger.Debug("根据链接获取文章", "link", link)
 
-	query := "SELECT title, summary, source, pub_date, category, link FROM articles WHERE link = ?"
+	query := "SELECT title, summary, summary_length, source, pub_date, category, link FROM articles WHERE link = ?"
 	row := r.db.QueryRow(query, link)
 
 	var article model.AnalysisResult
-	err := row.Scan(&article.Title, &article.Summary, &article.Source, &article.PubDate, &article.Category, &article.Link)
+	err := row.Scan(&article.Title, &article.Summary, &article.SummaryLength, &article.Source, &article.PubDate, &article.Category, &article.Link)
 	if err != nil {
 		logger.Error("获取文章失败", "error", err)
 		return nil, fmt.Errorf("获取文章失败: %w", err)
