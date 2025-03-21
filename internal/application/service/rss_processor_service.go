@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -92,11 +93,7 @@ func (s *rssProcessorService) ProcessRss(params model.ProcessParams) (string, er
 
 	// 4. 分析文章内容
 	logger.Info("开始分析文章内容", "articles_count", len(articles))
-	analysisResults, err := s.analyzeArticles(articles, params)
-	if err != nil {
-		logger.Error("分析文章失败", "error", err)
-		return "", fmt.Errorf("分析文章失败: %w", err)
-	}
+	analysisResults := s.analyzeArticles(articles, params)
 
 	// 5. 保存分析结果到数据库（如果启用）
 	if params.DatabaseConfig.Enabled && s.articleRepo != nil {
@@ -117,14 +114,56 @@ func (s *rssProcessorService) ProcessRss(params model.ProcessParams) (string, er
 	return report, nil
 }
 
+// processArticleTask 处理单个文章任务
+func (s *rssProcessorService) processArticleTask(article model.Article, params model.ProcessParams) (model.AnalysisResult, bool) {
+	// 检查文章内容是否为空
+	if article.Content == "" {
+		logger.Warn("文章内容为空，跳过处理", "title", article.Title)
+		return model.AnalysisResult{}, true
+	}
+
+	// 如果启用了数据库，检查文章是否已存在
+	if params.DatabaseConfig.Enabled && s.articleRepo != nil {
+		exists, err := s.articleRepo.ArticleExists(article.Link)
+		if err != nil {
+			logger.Error("检查文章是否存在失败", "title", article.Title, "error", err)
+			// 继续处理，不中断流程
+		} else if exists {
+			logger.Info("文章已存在于数据库中，跳过处理", "title", article.Title, "link", article.Link)
+			// 从数据库获取已存在的文章
+			existingArticle, err := s.articleRepo.GetArticleByLink(article.Link)
+			if err == nil && existingArticle != nil {
+				logger.Info("已从数据库获取文章", "title", existingArticle.Title)
+				return *existingArticle, false
+			}
+			// 如果获取失败，继续正常处理
+		}
+	}
+
+	result := model.AnalysisResult{
+		Title:    article.Title,
+		Summary:  s.processArticleContent(article, params.DeepseekConfig),
+		Source:   article.Source.Title,
+		PubDate:  article.PublishDate,
+		Category: "未分类", // 默认分类
+		Link:     article.Link,
+	}
+
+	// 尝试从内容中提取分类信息
+	category := s.extractCategoryFromContent(article.Content)
+	if category != "" {
+		result.Category = category
+	}
+
+	logger.Debug("处理后的文章内容", "result.Summary", result.Summary, "content_length", len(result.Summary))
+	return result, false
+}
+
 // analyzeArticles 使用Deepseek API分析文章内容
-// 该函数处理文章内容，调用API进行分析，并返回分析结果
-func (s *rssProcessorService) analyzeArticles(articles []model.Article, params model.ProcessParams) ([]model.AnalysisResult, error) {
-	// 1. 准备文章内容
+func (s *rssProcessorService) analyzeArticles(articles []model.Article, params model.ProcessParams) []model.AnalysisResult {
 	logger.Debug("开始准备文章内容进行分析", "articles_count", len(articles))
 
-	// 使用并发处理文章分析
-	// 设置并发数量，默认为5，如果配置了RSS并发数，则使用该值
+	// 设置并发数量
 	concurrency := 5
 	if params.RssConfig.Concurrency > 0 {
 		concurrency = params.RssConfig.Concurrency
@@ -149,52 +188,8 @@ func (s *rssProcessorService) analyzeArticles(articles []model.Article, params m
 	for i := 0; i < concurrency; i++ {
 		go func() {
 			for task := range workChan {
-				article := task.article
-
-				// 检查文章内容是否为空
-				if article.Content == "" {
-					logger.Warn("文章内容为空，跳过处理", "title", article.Title)
-					resultChan <- analysisResultWithIndex{index: task.index, skip: true}
-					continue
-				}
-
-				// 如果启用了数据库，检查文章是否已存在
-				if params.DatabaseConfig.Enabled && s.articleRepo != nil {
-					exists, err := s.articleRepo.ArticleExists(article.Link)
-					if err != nil {
-						logger.Error("检查文章是否存在失败", "title", article.Title, "error", err)
-						// 继续处理，不中断流程
-					} else if exists {
-						logger.Info("文章已存在于数据库中，跳过处理", "title", article.Title, "link", article.Link)
-						// 从数据库获取已存在的文章
-						existingArticle, err := s.articleRepo.GetArticleByLink(article.Link)
-						if err == nil && existingArticle != nil {
-							// 添加到结果中
-							resultChan <- analysisResultWithIndex{result: *existingArticle, index: task.index, skip: false}
-							logger.Info("已从数据库获取文章", "title", existingArticle.Title)
-							continue
-						}
-						// 如果获取失败，继续正常处理
-					}
-				}
-
-				result := model.AnalysisResult{
-					Title:    article.Title,
-					Summary:  s.processArticleContent(article, params.DeepseekConfig), // 内容已在之前的处理中被摘要
-					Source:   article.Source.Title,
-					PubDate:  article.PublishDate,
-					Category: "未分类", // 默认分类
-					Link:     article.Link,
-				}
-
-				// 尝试从内容中提取分类信息
-				category := s.extractCategoryFromContent(article.Content)
-				if category != "" {
-					result.Category = category
-				}
-
-				logger.Debug("处理后的文章内容", "result.Summary", result.Summary, "content_length", len(result.Summary))
-				resultChan <- analysisResultWithIndex{result: result, index: task.index, skip: false}
+				result, skip := s.processArticleTask(task.article, params)
+				resultChan <- analysisResultWithIndex{result: result, index: task.index, skip: skip}
 			}
 		}()
 	}
@@ -226,7 +221,7 @@ func (s *rssProcessorService) analyzeArticles(articles []model.Article, params m
 	}
 
 	logger.Info("文章分析完成", "results_count", len(results), "skipped_count", skippedCount)
-	return results, nil
+	return results
 }
 
 // processArticleContent 处理文章内容，如果内容过长则进行摘要
@@ -264,192 +259,8 @@ func (s *rssProcessorService) summarizeContent(content string, config model.Deep
 	return result, nil
 }
 
-// callDeepseekAPI 调用Deepseek API进行内容分析
-func (s *rssProcessorService) callDeepseekAPI(prompt string, config model.DeepseekConfig) (string, error) {
-	// 增加API调用计数
-	s.apiCallCount++
-	logger.Info("调用Deepseek API", "call_count", s.apiCallCount, "model", config.Model)
-
-	// 检查API调用次数是否超过限制
-	if config.MaxCalls > 0 && s.apiCallCount > config.MaxCalls {
-		logger.Warn("已达到API调用次数上限", "max_calls", config.MaxCalls, "current_calls", s.apiCallCount)
-		return "", nil // 直接返回空
-	}
-
-	// 检查API密钥是否配置
-	if config.APIKey == "" {
-		logger.Error("未配置Deepseek API密钥")
-		return "", fmt.Errorf("未配置Deepseek API密钥")
-	}
-
-	// 记录API请求参数（不包含完整的API密钥）
-	apiKeyMasked := "****" + config.APIKey[len(config.APIKey)-4:]
-	logger.Debug("Deepseek API请求参数",
-		"model", config.Model,
-		"max_tokens", config.MaxTokens,
-		"api_key", apiKeyMasked,
-		"prompt_length", len(prompt))
-	logger.Debug("Deepseek API提示词", "prompt_preview", prompt)
-
-	// 准备请求URL和请求体
-	apiURL := config.APIUrl
-	// 如果配置中的API URL为空，则使用默认值
-	if apiURL == "" {
-		apiURL = "https://api.deepseek.com/v1/chat/completions"
-		logger.Warn("未配置Deepseek API URL，使用默认值", "default_url", apiURL)
-	}
-	requestBody := map[string]interface{}{
-		"model": config.Model,
-		"messages": []map[string]string{
-			{"role": "user", "content": prompt},
-		},
-		"max_tokens": config.MaxTokens,
-	}
-
-	// 将请求体转换为JSON
-	requestJSON, err := json.Marshal(requestBody)
-	if err != nil {
-		logger.Error("构建API请求失败", "error", err)
-		return "", fmt.Errorf("构建API请求失败: %w", err)
-	}
-
-	// 创建HTTP请求
-	req, err := http.NewRequest("POST", apiURL, bytes.NewBuffer(requestJSON))
-	if err != nil {
-		logger.Error("创建HTTP请求失败", "error", err)
-		return "", fmt.Errorf("创建HTTP请求失败: %w", err)
-	}
-
-	// 设置请求头
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+config.APIKey)
-
-	// 发送请求，使用更短的超时时间
-	client := &http.Client{Timeout: 30 * time.Second} // 从60秒减少到30秒
-	logger.Debug("发送Deepseek API请求", "url", apiURL, "timeout", "30s")
-
-	// 实现智能的重试机制
-	var resp *http.Response
-	var requestDuration time.Duration
-	maxRetries := 3
-	var lastErr error
-
-	for retryCount := 0; retryCount < maxRetries; retryCount++ {
-		start := time.Now()
-
-		// 添加上下文超时控制
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		reqWithCtx := req.WithContext(ctx)
-
-		resp, err = client.Do(reqWithCtx)
-		requestDuration = time.Since(start)
-		logger.Debug("Deepseek API请求耗时", "duration_ms", requestDuration.Milliseconds(), "attempt", retryCount+1)
-
-		// 请求成功，跳出重试循环
-		if err == nil {
-			break
-		}
-
-		lastErr = err
-		logger.Warn("发送API请求失败，准备重试", "error", err, "attempt", retryCount+1, "duration_ms", requestDuration.Milliseconds())
-
-		// 取消上下文
-		cancel()
-
-		// 如果还有重试机会，等待一段时间后重试（指数退避策略）
-		if retryCount < maxRetries-1 {
-			backoffTime := time.Duration(1<<retryCount) * time.Second
-			logger.Info("等待重试", "backoff_time_ms", backoffTime.Milliseconds())
-			time.Sleep(backoffTime)
-		}
-	}
-
-	// 所有重试都失败
-	if err != nil {
-		logger.Error("发送API请求失败，已达到最大重试次数", "error", lastErr, "max_retries", maxRetries)
-		return "", fmt.Errorf("发送API请求失败: %w", lastErr)
-	}
-	defer resp.Body.Close()
-
-	// 读取响应，添加更智能的超时控制
-	responseBodyChan := make(chan []byte, 1)
-	readErrChan := make(chan error, 1)
-
-	go func() {
-		// 使用带缓冲的读取方式，避免大响应体导致的内存问题
-		const maxSize = 10 * 1024 * 1024                 // 10MB 最大响应大小限制
-		buf := bytes.NewBuffer(make([]byte, 0, 32*1024)) // 32KB 初始缓冲区
-
-		// 分块读取响应体
-		chunk := make([]byte, 4096)
-		totalSize := 0
-		for {
-			n, err := resp.Body.Read(chunk)
-			if n > 0 {
-				totalSize += n
-				// 检查响应大小是否超过限制
-				if totalSize > maxSize {
-					readErrChan <- fmt.Errorf("响应体过大，超过%dMB限制", maxSize/1024/1024)
-					return
-				}
-				// 写入缓冲区
-				buf.Write(chunk[:n])
-			}
-			if err != nil {
-				if err == io.EOF {
-					break // 读取完成
-				}
-				readErrChan <- err
-				return
-			}
-		}
-		responseBodyChan <- buf.Bytes()
-	}()
-
-	// 等待读取完成或超时，使用更短的超时时间
-	var responseBody []byte
-	select {
-	case responseBody = <-responseBodyChan:
-		// 读取成功
-		logger.Debug("成功读取API响应", "response_size_bytes", len(responseBody))
-	case err = <-readErrChan:
-		logger.Error("读取API响应失败", "error", err)
-		return "", fmt.Errorf("读取API响应失败: %w", err)
-	case <-time.After(30 * time.Second): // 从10秒增加到30秒，给大响应体更多处理时间
-		logger.Error("读取API响应超时")
-		return "", fmt.Errorf("读取API响应超时")
-	}
-
-	// 检查响应状态码并处理错误
-	if resp.StatusCode != http.StatusOK {
-		// 记录详细的错误信息
-		logger.Error("API请求返回错误",
-			"status_code", resp.StatusCode,
-			"response", string(responseBody),
-			"request_duration_ms", requestDuration.Milliseconds())
-
-		// 根据状态码提供更具体的错误信息
-		var errMsg string
-		switch resp.StatusCode {
-		case 429:
-			errMsg = "API请求频率过高，请稍后重试"
-		case 401, 403:
-			errMsg = "API认证失败，请检查API密钥"
-		case 500, 502, 503, 504:
-			errMsg = "API服务器错误，请稍后重试"
-		default:
-			errMsg = fmt.Sprintf("API请求返回错误(状态码:%d): %s", resp.StatusCode, string(responseBody))
-		}
-		return "", fmt.Errorf(errMsg)
-	}
-
-	// 记录原始响应内容（仅记录预览，避免日志过大）
-	responsePreview := string(responseBody)
-	if len(responsePreview) > 200 {
-		responsePreview = responsePreview[:200] + "..."
-	}
-	logger.Debug("Deepseek API原始响应", "response_length", len(responseBody), "response_preview", responsePreview)
-
+// processAPIResponse 处理API响应
+func (s *rssProcessorService) processAPIResponse(responseBody []byte, responsePreview string) (string, error) {
 	// 解析响应JSON，使用更健壮的错误处理
 	var response map[string]interface{}
 	if err := json.Unmarshal(responseBody, &response); err != nil {
@@ -491,10 +302,227 @@ func (s *rssProcessorService) callDeepseekAPI(prompt string, config model.Deepse
 			"total_tokens", usage["total_tokens"])
 	}
 
-	logger.Info("成功获取Deepseek API响应", "content_length", len(content), "duration_ms", requestDuration.Milliseconds())
-	logger.Debug("API响应内容", "content", content)
-
 	return content, nil
+}
+
+// readAPIResponse 读取API响应
+func (s *rssProcessorService) readAPIResponse(resp *http.Response) ([]byte, error) {
+	responseBodyChan := make(chan []byte, 1)
+	readErrChan := make(chan error, 1)
+
+	go func() {
+		// 使用带缓冲的读取方式，避免大响应体导致的内存问题
+		const maxSize = 10 * 1024 * 1024                 // 10MB 最大响应大小限制
+		buf := bytes.NewBuffer(make([]byte, 0, 32*1024)) // 32KB 初始缓冲区
+
+		// 分块读取响应体
+		chunk := make([]byte, 4096)
+		totalSize := 0
+		for {
+			n, err := resp.Body.Read(chunk)
+			if n > 0 {
+				totalSize += n
+				// 检查响应大小是否超过限制
+				if totalSize > maxSize {
+					readErrChan <- fmt.Errorf("响应体过大，超过%dMB限制", maxSize/1024/1024)
+					return
+				}
+				// 写入缓冲区
+				buf.Write(chunk[:n])
+			}
+			if err != nil {
+				if err == io.EOF {
+					break // 读取完成
+				}
+				readErrChan <- err
+				return
+			}
+		}
+		responseBodyChan <- buf.Bytes()
+	}()
+
+	// 等待读取完成或超时
+	select {
+	case responseBody := <-responseBodyChan:
+		// 读取成功
+		logger.Debug("成功读取API响应", "response_size_bytes", len(responseBody))
+		return responseBody, nil
+	case err := <-readErrChan:
+		logger.Error("读取API响应失败", "error", err)
+		return nil, fmt.Errorf("读取API响应失败: %w", err)
+	case <-time.After(30 * time.Second):
+		logger.Error("读取API响应超时")
+		return nil, fmt.Errorf("读取API响应超时")
+	}
+}
+
+// handleAPIError 处理API错误
+func (s *rssProcessorService) handleAPIError(statusCode int, responseBody []byte, requestDuration time.Duration) error {
+	// 记录详细的错误信息
+	logger.Error("API请求返回错误",
+		"status_code", statusCode,
+		"response", string(responseBody),
+		"request_duration_ms", requestDuration.Milliseconds())
+
+	// 根据状态码提供更具体的错误信息
+	var errMsg string
+	switch statusCode {
+	case 429:
+		errMsg = "API请求频率过高，请稍后重试"
+	case 401, 403:
+		errMsg = "API认证失败，请检查API密钥"
+	case 500, 502, 503, 504:
+		errMsg = "API服务器错误，请稍后重试"
+	default:
+		errMsg = fmt.Sprintf("API请求返回错误(状态码:%d): %s", statusCode, string(responseBody))
+	}
+	return errors.New(errMsg)
+}
+
+// prepareDeepseekRequest 准备Deepseek API请求
+func (s *rssProcessorService) prepareDeepseekRequest(prompt string, config model.DeepseekConfig) (*http.Request, string, error) {
+	// 准备请求URL和请求体
+	apiURL := config.APIUrl
+	if apiURL == "" {
+		apiURL = "https://api.deepseek.com/v1/chat/completions"
+		logger.Warn("未配置Deepseek API URL，使用默认值", "default_url", apiURL)
+	}
+	requestBody := map[string]interface{}{
+		"model": config.Model,
+		"messages": []map[string]string{
+			{"role": "user", "content": prompt},
+		},
+		"max_tokens": config.MaxTokens,
+	}
+
+	// 将请求体转换为JSON
+	requestJSON, err := json.Marshal(requestBody)
+	if err != nil {
+		logger.Error("构建API请求失败", "error", err)
+		return nil, "", fmt.Errorf("构建API请求失败: %w", err)
+	}
+
+	// 创建HTTP请求
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(ctx, "POST", apiURL, bytes.NewBuffer(requestJSON))
+	if err != nil {
+		logger.Error("创建HTTP请求失败", "error", err)
+		return nil, "", fmt.Errorf("创建HTTP请求失败: %w", err)
+	}
+
+	// 设置请求头
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+config.APIKey)
+
+	return req, apiURL, nil
+}
+
+// sendDeepseekRequest 发送Deepseek API请求
+func (s *rssProcessorService) sendDeepseekRequest(req *http.Request, apiURL string) (string, error) {
+	// 发送请求，使用更短的超时时间
+	client := &http.Client{Timeout: 30 * time.Second}
+	logger.Debug("发送Deepseek API请求", "url", apiURL, "timeout", "30s")
+
+	// 实现智能的重试机制
+	var resp *http.Response
+	var requestDuration time.Duration
+	maxRetries := 3
+	var lastErr error
+
+	for retryCount := 0; retryCount < maxRetries; retryCount++ {
+		start := time.Now()
+
+		// 添加上下文超时控制
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		reqWithCtx := req.WithContext(ctx)
+		resp, lastErr = client.Do(reqWithCtx)
+		requestDuration = time.Since(start)
+		if lastErr != nil {
+			logger.Warn("发送API请求失败，准备重试", "error", lastErr, "attempt", retryCount+1, "duration_ms", requestDuration.Milliseconds())
+			continue
+		}
+		if resp != nil {
+			defer resp.Body.Close()
+		}
+
+		// 读取响应
+		responseBody, err := s.readAPIResponse(resp)
+		if err != nil {
+			return "", err
+		}
+
+		// 检查响应状态码并处理错误
+		if resp.StatusCode != http.StatusOK {
+			return "", s.handleAPIError(resp.StatusCode, responseBody, requestDuration)
+		}
+
+		// 记录原始响应内容（仅记录预览，避免日志过大）
+		responsePreview := string(responseBody)
+		if len(responsePreview) > 200 {
+			responsePreview = responsePreview[:200] + "..."
+		}
+		logger.Debug("Deepseek API原始响应", "response_length", len(responseBody), "response_preview", responsePreview)
+
+		// 处理响应
+		content, err := s.processAPIResponse(responseBody, responsePreview)
+		if err != nil {
+			return "", err
+		}
+
+		logger.Info("成功获取Deepseek API响应", "content_length", len(content), "duration_ms", requestDuration.Milliseconds())
+		logger.Debug("API响应内容", "content", content)
+
+		return content, nil
+	}
+
+	// 所有重试都失败
+	if lastErr != nil {
+		logger.Error("发送API请求失败，已达到最大重试次数", "error", lastErr, "max_retries", maxRetries)
+		return "", fmt.Errorf("发送API请求失败: %w", lastErr)
+	}
+
+	return "", nil
+}
+
+// callDeepseekAPI 调用Deepseek API进行内容分析
+func (s *rssProcessorService) callDeepseekAPI(prompt string, config model.DeepseekConfig) (string, error) {
+	// 增加API调用计数
+	s.apiCallCount++
+	logger.Info("调用Deepseek API", "call_count", s.apiCallCount, "model", config.Model)
+
+	// 检查API调用次数是否超过限制
+	if config.MaxCalls > 0 && s.apiCallCount > config.MaxCalls {
+		logger.Warn("已达到API调用次数上限", "max_calls", config.MaxCalls, "current_calls", s.apiCallCount)
+		return "", nil
+	}
+
+	// 检查API密钥是否配置
+	if config.APIKey == "" {
+		logger.Error("未配置Deepseek API密钥")
+		return "", fmt.Errorf("未配置Deepseek API密钥")
+	}
+
+	// 记录API请求参数（不包含完整的API密钥）
+	apiKeyMasked := "****" + config.APIKey[len(config.APIKey)-4:]
+	logger.Debug("Deepseek API请求参数",
+		"model", config.Model,
+		"max_tokens", config.MaxTokens,
+		"api_key", apiKeyMasked,
+		"prompt_length", len(prompt))
+	logger.Debug("Deepseek API提示词", "prompt_preview", prompt)
+
+	// 准备请求
+	req, apiURL, err := s.prepareDeepseekRequest(prompt, config)
+	if err != nil {
+		return "", err
+	}
+
+	// 发送请求
+	return s.sendDeepseekRequest(req, apiURL)
 }
 
 // generateReport 根据分析结果生成报告
@@ -560,40 +588,40 @@ func (s *rssProcessorService) generateReport(results []model.AnalysisResult, day
 // extractCategoryFromContent 从内容中提取分类信息
 func (s *rssProcessorService) extractCategoryFromContent(content string) string {
 	// 使用正则表达式尝试提取分类信息
+	if category := s.extractCategoryFromRegex(content); category != "" {
+		return category
+	}
+
+	// 根据内容关键词判断分类
+	return s.extractCategoryFromKeywords(strings.ToLower(content))
+}
+
+// extractCategoryFromRegex 使用正则表达式从内容中提取分类信息
+func (s *rssProcessorService) extractCategoryFromRegex(content string) string {
 	categoryRegex := regexp.MustCompile(`(?i)(?:分类|category)[：:](\s*)(\w+)`)
 	matches := categoryRegex.FindStringSubmatch(content)
 
 	if len(matches) >= 3 {
 		return strings.TrimSpace(matches[2])
 	}
-
-	// 根据内容关键词判断分类
-	lowerContent := strings.ToLower(content)
-
-	// 技术相关
-	if strings.Contains(lowerContent, "技术") ||
-		strings.Contains(lowerContent, "编程") ||
-		strings.Contains(lowerContent, "开发") ||
-		strings.Contains(lowerContent, "代码") {
-		return "技术"
-	}
-
-	// 科技相关
-	if strings.Contains(lowerContent, "科技") ||
-		strings.Contains(lowerContent, "ai") ||
-		strings.Contains(lowerContent, "人工智能") {
-		return "科技"
-	}
-
-	// 商业相关
-	if strings.Contains(lowerContent, "商业") ||
-		strings.Contains(lowerContent, "经济") ||
-		strings.Contains(lowerContent, "金融") ||
-		strings.Contains(lowerContent, "市场") {
-		return "商业"
-	}
-
 	return ""
+}
+
+// extractCategoryFromKeywords 根据关键词判断分类
+func (s *rssProcessorService) extractCategoryFromKeywords(lowerContent string) string {
+	switch {
+	case strings.Contains(lowerContent, "代码") ||
+		strings.Contains(lowerContent, "编程"):
+		return "技术"
+	case strings.Contains(lowerContent, "人工智能") ||
+		strings.Contains(lowerContent, "AI"):
+		return "AI"
+	case strings.Contains(lowerContent, "市场") ||
+		strings.Contains(lowerContent, "经济"):
+		return "商业"
+	default:
+		return "其他"
+	}
 }
 
 // initDatabase 初始化数据库
