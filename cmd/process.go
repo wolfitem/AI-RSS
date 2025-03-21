@@ -84,7 +84,7 @@ var processCmd = &cobra.Command{
 		}
 
 		// 输出到文件
-		err = os.WriteFile(outputFile, []byte(result), 0644)
+		err = os.WriteFile(outputFile, []byte(result), 0600)
 		if err != nil {
 			return fmt.Errorf("写入输出文件失败: %w", err)
 		}
@@ -94,10 +94,10 @@ var processCmd = &cobra.Command{
 	},
 }
 
-func init() {
+// initProcessCmd 初始化处理命令
+func initProcessCmd() {
 	rootCmd.AddCommand(processCmd)
 
 	// 本地标志
 	processCmd.Flags().StringVarP(&outputFile, "output", "f", "", "输出文件路径（可选，默认为stdout）")
-
 }

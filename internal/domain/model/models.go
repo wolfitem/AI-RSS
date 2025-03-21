@@ -39,7 +39,7 @@ type RssConfig struct {
 // RssSource 表示一个RSS源
 type RssSource struct {
 	Title  string // RSS源标题
-	XmlUrl string // RSS源URL
+	XMLUrl string // RSS源URL
 }
 
 // Article 表示一篇文章

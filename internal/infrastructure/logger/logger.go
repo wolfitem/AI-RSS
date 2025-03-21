@@ -119,10 +119,11 @@ func Init(config Config) error {
 }
 
 // Sync 同步日志缓冲区到输出
-func Sync() {
+func Sync() error {
 	if log != nil {
-		_ = log.Sync()
+		return log.Sync()
 	}
+	return nil
 }
 
 // Debug 记录调试级别日志

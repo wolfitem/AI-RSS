@@ -3,13 +3,11 @@ package cmd
 import (
 	"fmt"
 	"os"
-	"os/signal"
-	"syscall"
-	"time"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/wolfitem/ai-rss/internal/infrastructure/logger"
+	"github.com/wolfitem/ai-rss/internal/version"
 )
 
 var cfgFile string
@@ -26,20 +24,20 @@ var rootCmd = &cobra.Command{
 // Execute adds all child commands to the root command and sets flags appropriately.
 // This is called by main.main(). It only needs to happen once to the rootCmd.
 func Execute() {
-	// 设置信号处理
-	setupSignalHandler()
-
-	// 程序退出前同步日志
-	defer logger.Sync()
+	// 初始化所有命令
+	initRootCmd()
+	initProcessCmd()
+	initVersionCmd()
 
 	err := rootCmd.Execute()
 	if err != nil {
 		fmt.Println(err)
-		os.Exit(1)
+		return
 	}
 }
 
-func init() {
+// initRootCmd 初始化根命令
+func initRootCmd() {
 	cobra.OnInitialize(initConfig)
 
 	// 全局标志
@@ -48,13 +46,16 @@ func init() {
 
 	// 添加版本标志的处理
 	rootCmd.PersistentPreRun = func(cmd *cobra.Command, args []string) {
-		showVersion, _ := cmd.Flags().GetBool("version")
+		showVersion, err := cmd.Flags().GetBool("version")
+		if err != nil {
+			fmt.Printf("获取版本标志失败: %v\n", err)
+			return
+		}
 		if showVersion {
-			// 如果 Version 为空，则显示开发版本
-			if Version == "" {
-				Version = "开发版本"
+			if version.Version == "" {
+				version.Version = "开发版本"
 			}
-			fmt.Printf("AI-RSS 版本: %s\n", Version)
+			fmt.Printf("AI-RSS 版本: %s\n", version.Version)
 			os.Exit(0)
 		}
 	}
@@ -103,41 +104,4 @@ func initLogger() {
 	if err := logger.Init(logConfig); err != nil {
 		fmt.Printf("初始化日志系统失败: %v\n", err)
 	}
-}
-
-// 内存监控器实例
-var memMonitor *logger.MemStatsMonitor
-
-// setupSignalHandler 设置信号处理，捕获Ctrl+C（SIGINT）和SIGTERM信号
-func setupSignalHandler() {
-	c := make(chan os.Signal, 1)
-	// 监听SIGINT（Ctrl+C）和SIGTERM信号
-	signal.Notify(c, syscall.SIGINT, syscall.SIGTERM)
-
-	// 启动内存监控
-	memMonitor = logger.NewMemStatsMonitor(30 * time.Second) // 每30秒记录一次内存使用情况
-	memMonitor.Start()
-	logger.Info("内存监控已启动", "interval_seconds", 30)
-
-	// 在后台协程中处理信号
-	go func() {
-		sig := <-c
-		logger.Info("接收到信号，准备退出程序", "signal", sig)
-		fmt.Printf("\n接收到信号 %s，正在退出程序...\n", sig)
-
-		// 停止内存监控
-		if memMonitor != nil {
-			memMonitor.Stop()
-			logger.Info("内存监控已停止")
-		}
-
-		// 记录最终内存使用情况
-		logger.LogMemStatsOnce()
-
-		// 同步日志
-		logger.Sync()
-
-		// 退出程序
-		os.Exit(0)
-	}()
 }
