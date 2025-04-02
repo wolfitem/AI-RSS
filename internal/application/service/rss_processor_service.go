@@ -307,6 +307,10 @@ func (s *rssProcessorService) processAPIResponse(responseBody []byte, responsePr
 
 // readAPIResponse 读取API响应
 func (s *rssProcessorService) readAPIResponse(resp *http.Response) ([]byte, error) {
+	// 创建一个带有超时的上下文，用于控制整个读取过程
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel() // 确保资源被释放
+
 	responseBodyChan := make(chan []byte, 1)
 	readErrChan := make(chan error, 1)
 
@@ -315,11 +319,51 @@ func (s *rssProcessorService) readAPIResponse(resp *http.Response) ([]byte, erro
 		const maxSize = 10 * 1024 * 1024                 // 10MB 最大响应大小限制
 		buf := bytes.NewBuffer(make([]byte, 0, 32*1024)) // 32KB 初始缓冲区
 
-		// 分块读取响应体
+		// 分块读取响应体，添加超时控制
 		chunk := make([]byte, 4096)
 		totalSize := 0
+
+		// 使用更小的读取超时，避免单次读取阻塞太久
+		readTimeout := 15 * time.Second
 		for {
-			n, err := resp.Body.Read(chunk)
+			// 检查上下文是否已取消
+			select {
+			case <-ctx.Done():
+				// 上下文已取消，可能是因为超时
+				if ctx.Err() == context.DeadlineExceeded {
+					readErrChan <- fmt.Errorf("读取响应超时: %w", ctx.Err())
+				} else {
+					readErrChan <- ctx.Err()
+				}
+				return
+			default:
+				// 继续执行
+			}
+
+			// 设置单次读取的超时
+			readCtx, readCancel := context.WithTimeout(ctx, readTimeout)
+			readDone := make(chan struct{})
+
+			// 使用goroutine进行单次读取，避免阻塞
+			var n int
+			var readErr error
+			go func() {
+				n, readErr = resp.Body.Read(chunk)
+				close(readDone)
+			}()
+
+			// 等待读取完成或超时
+			select {
+			case <-readDone:
+				// 读取完成
+			case <-readCtx.Done():
+				// 单次读取超时
+				readCancel()
+				readErrChan <- fmt.Errorf("单次读取超时: %w", readCtx.Err())
+				return
+			}
+			readCancel() // 释放资源
+
 			if n > 0 {
 				totalSize += n
 				// 检查响应大小是否超过限制
@@ -330,18 +374,21 @@ func (s *rssProcessorService) readAPIResponse(resp *http.Response) ([]byte, erro
 				// 写入缓冲区
 				buf.Write(chunk[:n])
 			}
-			if err != nil {
-				if err == io.EOF {
+
+			if readErr != nil {
+				if readErr == io.EOF {
 					break // 读取完成
 				}
-				readErrChan <- err
+				readErrChan <- readErr
 				return
 			}
 		}
+
+		// 读取完成，发送结果
 		responseBodyChan <- buf.Bytes()
 	}()
 
-	// 等待读取完成或超时
+	// 等待读取完成或上下文取消
 	select {
 	case responseBody := <-responseBodyChan:
 		// 读取成功
@@ -349,10 +396,14 @@ func (s *rssProcessorService) readAPIResponse(resp *http.Response) ([]byte, erro
 		return responseBody, nil
 	case err := <-readErrChan:
 		logger.Error("读取API响应失败", "error", err)
+		// 特别处理context deadline exceeded错误
+		if strings.Contains(err.Error(), "context deadline exceeded") || strings.Contains(err.Error(), "读取响应超时") {
+			return nil, fmt.Errorf("读取API响应超时，请检查网络连接或增加超时设置: %w", err)
+		}
 		return nil, fmt.Errorf("读取API响应失败: %w", err)
-	case <-time.After(30 * time.Second):
-		logger.Error("读取API响应超时")
-		return nil, fmt.Errorf("读取API响应超时")
+	case <-ctx.Done():
+		logger.Error("读取API响应整体超时", "error", ctx.Err())
+		return nil, fmt.Errorf("读取API响应整体超时: %w", ctx.Err())
 	}
 }
 
@@ -421,32 +472,67 @@ func (s *rssProcessorService) prepareDeepseekRequest(prompt string, config model
 
 // sendDeepseekRequest 发送Deepseek API请求
 func (s *rssProcessorService) sendDeepseekRequest(req *http.Request, apiURL string) (string, error) {
-	// 发送请求，使用更短的超时时间
-	client := &http.Client{Timeout: 30 * time.Second}
-	logger.Debug("发送Deepseek API请求", "url", apiURL, "timeout", "30s")
+	// 发送请求，使用更合理的超时时间
+	client := &http.Client{
+		Timeout: 45 * time.Second, // 增加超时时间
+		Transport: &http.Transport{
+			ResponseHeaderTimeout: 30 * time.Second,
+			ExpectContinueTimeout: 10 * time.Second,
+			TLSHandshakeTimeout:   15 * time.Second,
+			DisableKeepAlives:     false,
+			MaxIdleConnsPerHost:   10,
+		},
+	}
+	logger.Debug("发送Deepseek API请求", "url", apiURL, "timeout", "45s")
 
-	// 实现智能的重试机制
+	// 实现智能的重试机制，使用指数退避策略
 	var resp *http.Response
 	var requestDuration time.Duration
 	maxRetries := 3
 	var lastErr error
 
 	for retryCount := 0; retryCount < maxRetries; retryCount++ {
+		// 计算指数退避时间
+		if retryCount > 0 {
+			backoffTime := time.Duration(1<<uint(retryCount-1)) * time.Second
+			if backoffTime > 10*time.Second {
+				backoffTime = 10 * time.Second // 最大退避10秒
+			}
+			logger.Info("API请求重试等待", "retry_count", retryCount, "backoff_time_ms", backoffTime.Milliseconds())
+			time.Sleep(backoffTime)
+		}
+
 		start := time.Now()
 
-		// 添加上下文超时控制
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
+		// 为每次请求创建新的上下文，避免使用已取消的上下文
+		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 
+		// 创建新的请求，使用新的上下文
 		reqWithCtx := req.WithContext(ctx)
 		resp, lastErr = client.Do(reqWithCtx)
 		requestDuration = time.Since(start)
+
+		// 请求完成后取消上下文
+		cancel()
+
+		// 处理错误情况
 		if lastErr != nil {
-			logger.Warn("发送API请求失败，准备重试", "error", lastErr, "attempt", retryCount+1, "duration_ms", requestDuration.Milliseconds())
+			// 特别处理超时错误
+			if strings.Contains(lastErr.Error(), "context deadline exceeded") || strings.Contains(lastErr.Error(), "timeout") {
+				logger.Warn("API请求超时，准备重试", "error", lastErr, "attempt", retryCount+1, "duration_ms", requestDuration.Milliseconds())
+			} else {
+				logger.Warn("发送API请求失败，准备重试", "error", lastErr, "attempt", retryCount+1, "duration_ms", requestDuration.Milliseconds())
+			}
 			continue
 		}
+
+		// 确保响应体被关闭
 		if resp != nil {
-			defer resp.Body.Close()
+			defer func(body io.ReadCloser) {
+				if err := body.Close(); err != nil {
+					logger.Warn("关闭响应体失败", "error", err)
+				}
+			}(resp.Body)
 		}
 
 		// 读取响应
