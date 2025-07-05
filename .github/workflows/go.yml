@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        go-version: [1.20, 1.21, 1.22] # 可根据需要增减版本
+        go-version: ['1.20', '1.21', '1.22'] # 使用字符串格式确保版本正确
     steps:
       - name: Set up Go
         uses: actions/setup-go@v4
@@ -45,14 +45,14 @@ jobs:
             exit 1
           fi
 
-      - name: Run golint
+      - name: Run staticcheck
         run: |
-          go install golang.org/x/lint/golint@latest
+          go install honnef.co/go/tools/cmd/staticcheck@latest
           export PATH=$PATH:$(go env GOPATH)/bin
-          golint_output=$(golint ./... || true)
-          if [[ -n "$golint_output" ]]; then
-            echo "golint 报告如下:"
-            echo "$golint_output"
+          staticcheck_output=$(staticcheck ./... || true)
+          if [[ -n "$staticcheck_output" ]]; then
+            echo "staticcheck 报告如下:"
+            echo "$staticcheck_output"
             exit 1
           fi
 
@@ -102,7 +102,7 @@ jobs:
           ./build.sh
 
       - name: Archive binaries
-        uses: actions/upload-artifact v4 for upload-artifact everywhere. In .github/workflows@v4
+        uses: actions/upload-artifact@v4
         with:
           name: release-binaries
           path: bin/** # 支持多平台产物
