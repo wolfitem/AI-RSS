@@ -12,9 +12,11 @@ logger:
 deepseek:
   api_key: "sk-************"
   model: "deepseek-chat"
-  max_tokens: 2000
-  max_calls: 300           # API最大调用次数，超过此次数将直接返回原始数据
-  api_url: "https://api.deepseek.com/v1/chat/completions"  # API接口地址
+  max_tokens: 8000
+  max_calls: 300    # API最大调用次数，超过此次数将直接返回原始数据
+  api_url: "https://api.deepseek.com/v1/chat/completions"   # API接口地址
+  read_timeout: 300        # API响应读取超时时间（秒）
+  api_timeout: 120         # API请求超时时间（秒）
 
 # 输出配置
 output:
@@ -26,11 +28,11 @@ rss:
   days_back: 3            # 获取几天内的文章，默认为3天
   opml_file: "example.opml"  # OPML文件路径
   timeout: 20            # RSS源获取超时时间（秒），默认为20秒
-  concurrency: 10        # 并发获取RSS源的数量，默认为10
+  concurrency: 3         # 从10降低到3，减少并发压力
   max_retries: 3         # 最大重试次数，默认为3
-  response_timeout: 10   # 响应读取超时时间（秒），默认为10秒
-  overall_timeout: 60    # 整体操作超时时间（秒），默认为60秒
-  retry_backoff_base: 1  # 重试退避基数（秒），默认为1秒
+  response_timeout: 300  # 从120秒增加到300秒，给API响应更多时间
+  overall_timeout: 400   # 从160秒增加到400秒，整体超时时间
+  retry_backoff_base: 2  # 从1秒增加到2秒，重试间隔更长
 
 # 数据库配置
 database:
