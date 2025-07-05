@@ -1,130 +1,214 @@
+# GitHub Actions 工作流名称，会显示在 Actions 页面
 name: Go Build and Test
 
+# 定义触发工作流的条件
 on:
+  # 当代码推送到指定分支时触发
   push:
-    branches: [ "main" ]
+    branches: [ "main" ]  # 只在推送到 main 分支时触发
     tags:
-      - 'v*'  # 当推送 v* 标签时触发 release
+      - 'v*'  # 当推送以 v 开头的标签时触发（如 v1.0.0），用于发布版本
+  # 当创建针对指定分支的 Pull Request 时触发
   pull_request:
-    branches: [ "main" ]
+    branches: [ "main" ]  # 只在针对 main 分支的 PR 时触发
 
+# 设置所有 job 的默认配置
 defaults:
   run:
-    shell: bash
+    shell: bash  # 使用 bash 作为默认 shell（适用于 Linux/macOS）
 
+# 定义工作流中的所有任务（jobs）
 jobs:
+  # 测试任务：运行代码测试和质量检查
   test:
+    # 指定运行环境，ubuntu-latest 是最常用的 Linux 环境
     runs-on: ubuntu-latest
+
+    # 使用矩阵策略，可以在多个环境下并行运行相同的任务
     strategy:
       matrix:
+        # 定义 Go 版本矩阵，会为每个版本创建一个独立的任务实例
         go-version: ['1.22', '1.23'] # 使用支持最新工具的Go版本
+
+    # 定义任务中的具体步骤，按顺序执行
     steps:
+      # 第一步：设置 Go 开发环境
       - name: Set up Go
+        # 使用官方提供的 Go 设置 Action
         uses: actions/setup-go@v4
         with:
+          # 使用矩阵中定义的 Go 版本，${{ }} 是 GitHub Actions 的表达式语法
           go-version: ${{ matrix.go-version }}
-          
+
+      # 第二步：验证 Go 版本是否正确安装
       - name: Verify Go version
+        # 运行 shell 命令检查 Go 版本
         run: go version
-        
+
+      # 第三步：检出代码到运行环境
       - name: Checkout code
+        # 使用官方提供的代码检出 Action
         uses: actions/checkout@v4
 
+      # 第四步：缓存 Go 模块，提高构建速度
       - name: Cache Go modules
+        # 使用官方缓存 Action，避免重复下载依赖
         uses: actions/cache@v4
         with:
+          # 指定要缓存的目录路径
           path: |
-            ~/.cache/go-build
-            ~/go/pkg/mod
+            ~/.cache/go-build  # Go 构建缓存目录
+            ~/go/pkg/mod       # Go 模块缓存目录
+          # 缓存的唯一标识符，包含操作系统、Go版本和依赖文件哈希
           key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
 
+      # 第五步：运行代码质量检查
       - name: Run golangci-lint
+        # 使用 golangci-lint 官方 Action 进行代码质量检查
         uses: golangci/golangci-lint-action@v4
         with:
-          version: v1.61.0  # 指定兼容版本
-          args: --timeout=5m
+          version: v1.61.0  # 指定兼容的 golangci-lint 版本
+          args: --timeout=5m  # 设置超时时间为 5 分钟
 
+      # 第六步：运行测试并生成覆盖率报告
       - name: Run tests with coverage
+        # 运行 Go 测试命令
         run: go test -v -race -coverprofile=coverage.out ./...
+        # 参数说明：
+        # -v: 详细输出测试结果
+        # -race: 启用竞态条件检测
+        # -coverprofile: 生成覆盖率报告文件
+        # ./...: 测试当前目录及所有子目录
 
+      # 第七步：上传覆盖率报告作为构建产物
       - name: Upload coverage report artifact
+        # 使用官方 Action 上传文件作为 artifact（构建产物）
         uses: actions/upload-artifact@v4
         with:
+          # artifact 名称，包含 Go 版本以避免冲突
           name: coverage-report-go${{ matrix.go-version }}
+          # 要上传的文件路径
           path: coverage.out
+          # 如果文件不存在，发出警告而不是失败
           if-no-files-found: warn
+          # artifact 保留天数
           retention-days: 7
 
+      # 第八步：上传覆盖率到 Codecov（代码覆盖率分析服务）
       - name: Upload coverage to Codecov
+        # 使用 Codecov 官方 Action
         uses: codecov/codecov-action@v4
         with:
+          # 指定覆盖率报告文件
           files: coverage.out
-        # 只在最新版本的 Go 上传到 Codecov，避免重复
+        # 条件执行：只在最新版本的 Go 上传到 Codecov，避免重复
         if: matrix.go-version == '1.23'
 
+  # 构建任务：编译多平台二进制文件
   build:
+    # 依赖关系：必须等待 test 任务成功完成后才能运行
     needs: test
+    # 指定运行环境
     runs-on: ubuntu-latest
+
+    # 构建任务的步骤
     steps:
+      # 第一步：检出代码
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # 第二步：设置 Go 环境
       - name: Set up Go
         uses: actions/setup-go@v4
         with:
           go-version: '1.23' # 构建阶段使用最新稳定版本
 
+      # 第三步：缓存 Go 模块（与测试任务类似）
       - name: Cache Go modules
         uses: actions/cache@v4
         with:
           path: |
             ~/.cache/go-build
             ~/go/pkg/mod
+          # 注意：这里的 key 不包含 matrix.go-version，因为构建只用一个版本
           key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
 
+      # 第四步：确保构建脚本有执行权限
       - name: Ensure build.sh is executable
+        # 检查并设置脚本执行权限
         run: |
+          # 如果 build.sh 没有执行权限，则添加执行权限
           if [ ! -x build.sh ]; then
             chmod +x build.sh
           fi
 
+      # 第五步：执行多平台构建
       - name: Build multi-platform binaries
+        # 运行构建脚本生成多平台二进制文件
         run: |
-          set -e
-          ./build.sh
+          set -e  # 遇到错误立即退出
+          ./build.sh  # 执行构建脚本，会生成 bin/ 目录下的多平台二进制文件
 
+      # 第六步：上传构建产物
       - name: Archive binaries
+        # 将构建好的二进制文件上传为 artifact
         uses: actions/upload-artifact@v4
         with:
+          # artifact 名称
           name: release-binaries
+          # 上传 bin 目录下的所有文件（多平台二进制文件）
           path: bin/** # 支持多平台产物
+          # artifact 保留天数
           retention-days: 7
 
+  # 发布任务：创建 GitHub Release 并上传二进制文件
   release:
+    # 依赖关系：必须等待 test 和 build 任务都成功完成
     needs: [test, build]
+    # 指定运行环境
     runs-on: ubuntu-latest
-    if: startsWith(github.ref, 'refs/tags/v')  # 只在推送标签时运行
+    # 条件执行：只在推送以 v 开头的标签时运行（如 v1.0.0）
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    # 权限设置：GitHub Actions 需要特定权限才能执行某些操作
     permissions:
-      contents: write  # 需要写权限来创建 release
+      contents: write  # 需要写权限来创建 release 和上传文件
+
+    # 发布任务的步骤
     steps:
+      # 第一步：检出代码（获取 README、CHANGELOG 等文件用于 release）
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # 第二步：下载之前构建任务上传的二进制文件
       - name: Download build artifacts
+        # 使用官方 Action 下载 artifact
         uses: actions/download-artifact@v4
         with:
+          # 指定要下载的 artifact 名称（与构建任务中上传的名称一致）
           name: release-binaries
+          # 下载到指定目录
           path: bin/
 
+      # 第三步：显示下载的文件结构（用于调试和验证）
       - name: Display structure of downloaded files
+        # 列出下载的文件，确保所有平台的二进制文件都存在
         run: ls -la bin/
 
+      # 第四步：创建 GitHub Release
       - name: Create GitHub Release
+        # 使用第三方 Action 创建 GitHub Release
         uses: softprops/action-gh-release@v1
         with:
+          # 指定要上传到 release 的文件（所有二进制文件）
           files: bin/*
+          # 自动生成 release 说明（基于提交信息）
           generate_release_notes: true
+          # 不创建草稿版本，直接发布
           draft: false
+          # 不标记为预发布版本
           prerelease: false
+        # 环境变量：提供 GitHub Token 用于身份验证
         env:
+          # 使用 GitHub 自动提供的 token，具有仓库操作权限
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
