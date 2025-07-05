@@ -374,73 +374,6 @@ func (s *rssProcessorService) readResponseBody(resp *http.Response) ([]byte, err
 	return body, nil
 }
 
-			// 设置单次读取的超时
-			readCtx, readCancel := context.WithTimeout(ctx, readTimeout)
-			readDone := make(chan struct{})
-
-			// 使用goroutine进行单次读取，避免阻塞
-			var n int
-			var readErr error
-			go func() {
-				n, readErr = resp.Body.Read(chunk)
-				close(readDone)
-			}()
-
-			// 等待读取完成或超时
-			select {
-			case <-readDone:
-				// 读取完成
-			case <-readCtx.Done():
-				// 单次读取超时
-				readCancel()
-				readErrChan <- fmt.Errorf("单次读取超时: %w", readCtx.Err())
-				return
-			}
-			readCancel() // 释放资源
-
-			if n > 0 {
-				totalSize += n
-				// 检查响应大小是否超过限制
-				if totalSize > maxSize {
-					readErrChan <- fmt.Errorf("响应体过大，超过%dMB限制", maxSize/1024/1024)
-					return
-				}
-				// 写入缓冲区
-				buf.Write(chunk[:n])
-			}
-
-			if readErr != nil {
-				if readErr == io.EOF {
-					break // 读取完成
-				}
-				readErrChan <- readErr
-				return
-			}
-		}
-
-		// 读取完成，发送结果
-		responseBodyChan <- buf.Bytes()
-	}()
-
-	// 等待读取完成或上下文取消
-	select {
-	case responseBody := <-responseBodyChan:
-		// 读取成功
-		logger.Debug("成功读取API响应", "response_size_bytes", len(responseBody))
-		return responseBody, nil
-	case err := <-readErrChan:
-		logger.Error("读取API响应失败", "error", err)
-		// 特别处理context deadline exceeded错误
-		if strings.Contains(err.Error(), "context deadline exceeded") || strings.Contains(err.Error(), "读取响应超时") {
-			return nil, fmt.Errorf("读取API响应超时，请检查网络连接或增加超时设置: %w", err)
-		}
-		return nil, fmt.Errorf("读取API响应失败: %w", err)
-	case <-ctx.Done():
-		logger.Error("读取API响应整体超时", "error", ctx.Err())
-		return nil, fmt.Errorf("读取API响应整体超时: %w", ctx.Err())
-	}
-}
-
 // handleAPIError 处理API错误
 func (s *rssProcessorService) handleAPIError(statusCode int, responseBody []byte, requestDuration time.Duration) error {
 	// 记录详细的错误信息
@@ -505,7 +438,7 @@ func (s *rssProcessorService) prepareDeepseekRequest(prompt string, config model
 }
 
 // sendDeepseekRequest 发送Deepseek API请求
-func (s *rssProcessorService) sendDeepseekRequest(req *http.Request, apiURL string, config model.DeepseekConfig) (string, error) {
+func (s *rssProcessorService) sendDeepseekRequest(req *http.Request, _ string, config model.DeepseekConfig) (string, error) {
 	client := s.createHTTPClient(config)
 	return s.executeRequestWithRetry(req, client, config)
 }
@@ -532,30 +465,107 @@ func (s *rssProcessorService) createHTTPClient(config model.DeepseekConfig) *htt
 
 // executeRequestWithRetry 执行带重试的HTTP请求
 func (s *rssProcessorService) executeRequestWithRetry(req *http.Request, client *http.Client, config model.DeepseekConfig) (string, error) {
-	apiTimeout := 45 * time.Second
-	if config.APITimeout > 0 {
-		apiTimeout = time.Duration(config.APITimeout) * time.Second
-	}
+	apiTimeout := s.getAPITimeout(config)
 	logger.Debug("发送Deepseek API请求", "url", req.URL.String(), "timeout", apiTimeout.String())
 
-	// 实现智能的重试机制，使用指数退避策略
-	var resp *http.Response
-	var requestDuration time.Duration
 	maxRetries := 3
 	var lastErr error
 
 	for retryCount := 0; retryCount < maxRetries; retryCount++ {
-		// 计算指数退避时间
 		if retryCount > 0 {
-			// 安全的指数退避计算，避免整数溢出
-			exponent := retryCount - 1
-			if exponent > 10 { // 限制指数避免溢出
-				exponent = 10
+			backoffTime := s.calculateBackoffTime(retryCount)
+			if lastErr != nil && !s.isRetryableError(lastErr) {
+				logger.Warn("错误不可重试，停止重试", "error", lastErr)
+				break
 			}
-			backoffTime := time.Duration(1<<exponent) * time.Second
-			if backoffTime > 10*time.Second {
-				backoffTime = 10 * time.Second // 最大退避10秒
-			}
+			logger.Info("API请求重试等待", "retry_count", retryCount, "backoff_time_ms", backoffTime.Milliseconds())
+			time.Sleep(backoffTime)
+		}
+
+		result, err := s.executeSingleRequest(req, client, config, apiTimeout)
+		if err == nil {
+			return result, nil
+		}
+
+		lastErr = err
+		logger.Warn("API请求失败，准备重试", "error", err, "attempt", retryCount+1)
+	}
+
+	return "", fmt.Errorf("API请求失败，已重试%d次: %w", maxRetries, lastErr)
+}
+
+// getAPITimeout 获取API超时时间
+func (s *rssProcessorService) getAPITimeout(config model.DeepseekConfig) time.Duration {
+	apiTimeout := 45 * time.Second
+	if config.APITimeout > 0 {
+		apiTimeout = time.Duration(config.APITimeout) * time.Second
+	}
+	return apiTimeout
+}
+
+// calculateBackoffTime 计算退避时间
+func (s *rssProcessorService) calculateBackoffTime(retryCount int) time.Duration {
+	// 安全的指数退避计算，避免整数溢出
+	exponent := retryCount - 1
+	if exponent > 10 { // 限制指数避免溢出
+		exponent = 10
+	}
+	backoffTime := time.Duration(1<<exponent) * time.Second
+	if backoffTime > 10*time.Second {
+		backoffTime = 10 * time.Second // 最大退避10秒
+	}
+	return backoffTime
+}
+
+// executeSingleRequest 执行单次HTTP请求
+func (s *rssProcessorService) executeSingleRequest(req *http.Request, client *http.Client, config model.DeepseekConfig, apiTimeout time.Duration) (string, error) {
+	start := time.Now()
+
+	// 为每次请求创建新的上下文，避免使用已取消的上下文
+	ctx, cancel := context.WithTimeout(context.Background(), apiTimeout)
+	defer cancel()
+
+	// 创建新的请求，使用新的上下文
+	reqWithCtx := req.WithContext(ctx)
+	resp, err := client.Do(reqWithCtx)
+	requestDuration := time.Since(start)
+
+	if err != nil {
+		return "", s.handleRequestError(err, requestDuration)
+	}
+
+	return s.processResponse(resp, config, requestDuration)
+}
+
+// handleRequestError 处理请求错误
+func (s *rssProcessorService) handleRequestError(err error, requestDuration time.Duration) error {
+	if strings.Contains(err.Error(), "context deadline exceeded") || strings.Contains(err.Error(), "timeout") {
+		logger.Warn("API请求超时", "error", err, "duration_ms", requestDuration.Milliseconds())
+	} else {
+		logger.Warn("发送API请求失败", "error", err, "duration_ms", requestDuration.Milliseconds())
+	}
+	return err
+}
+
+// processResponse 处理响应
+func (s *rssProcessorService) processResponse(resp *http.Response, config model.DeepseekConfig, requestDuration time.Duration) (string, error) {
+	// 读取响应
+	responseBody, err := s.readAPIResponse(resp, config)
+	// 立即关闭响应体，避免在循环中使用defer
+	if resp != nil && resp.Body != nil {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			logger.Warn("关闭响应体失败", "error", closeErr)
+		}
+	}
+
+	if err != nil {
+		return "", err
+	}
+
+	// 检查响应状态码并处理错误
+	if resp.StatusCode != http.StatusOK {
+		return "", s.handleAPIError(resp.StatusCode, responseBody, requestDuration)
+	}
 			logger.Info("API请求重试等待", "retry_count", retryCount, "backoff_time_ms", backoffTime.Milliseconds())
 
 			// 检查是否是可重试的错误
