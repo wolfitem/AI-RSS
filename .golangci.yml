@@ -4,33 +4,25 @@
 run:
   # 默认并发数为可用CPU数
   concurrency: 4
-  
+
   # 超时设置，默认1分钟
   timeout: 1m
-  
+
   # 退出代码，如果至少有一个问题被发现
   issues-exit-code: 1
-  
+
   # 包含测试文件
   tests: true
-  
-  # 允许跳过目录
-  skip-dirs:
-    - vendor
-    - data
-  
-  # 允许跳过文件
-  skip-files:
-    - '.*_test\.go$'
 
 # 输出配置选项
 output:
   # 输出格式: colored-line-number|line-number|json|tab|checkstyle|code-climate|junit-xml|github-actions
-  format: colored-line-number
-  
+  formats:
+    - format: colored-line-number
+
   # 打印行号
   print-issued-lines: true
-  
+
   # 打印linter名称
   print-linter-name: true
 
@@ -39,25 +31,17 @@ linters:
   # 启用所有linters
   enable-all: false
   
-  # 禁用特定linters
-  disable:
-    - exhaustivestruct # 已弃用
-    - golint           # 已弃用，使用revive代替
-    - interfacer       # 已弃用
-    - maligned         # 已弃用，使用govet代替
-    - scopelint        # 已弃用，使用exportloopref代替
-    - varcheck         # 已弃用，使用unused代替
-    - deadcode         # 已弃用，使用unused代替
-    - structcheck      # 已弃用，使用unused代替
+  # 禁用特定linters (移除已废弃的检查器以避免警告)
+  disable: []
   
   # 启用特定linters
   enable:
     - asciicheck       # 检查非ASCII标识符
     - bodyclose        # 检查HTTP响应体是否关闭
+    - copyloopvar      # 检查循环变量引用 (替代exportloopref)
     - dogsled          # 检查过多的空白标识符
     - dupl             # 代码克隆检测器
     - errcheck         # 检查未处理的错误
-    - exportloopref    # 检查循环变量引用
     - funlen           # 检查函数长度
     - gochecknoinits   # 检查init函数
     - goconst          # 查找可以替换为常量的重复字符串
@@ -113,45 +97,21 @@ linters-settings:
     min-occurrences: 3
   
   gocritic:
-    # 启用特定检查器
+    # 启用特定检查器 (只列出非默认启用的检查器)
     enabled-checks:
       - appendCombine
-      - argOrder
-      - assignOp
-      - badCond
       - boolExprSimplify
       - builtinShadow
-      - captLocal
-      - caseOrder
       - commentedOutCode
       - commentedOutImport
-      - defaultCaseOrder
-      - dupBranchBody
-      - dupCase
-      - dupSubExpr
-      - elseif
       - emptyFallthrough
       - equalFold
-      - flagDeref
-      - ifElseChain
       - importShadow
       - indexAlloc
-      - mapKey
-      - newDeref
-      - offBy1
       - rangeExprCopy
-      - regexpMust
-      - sloppyLen
       - stringXbytes
-      - switchTrue
       - typeAssertChain
-      - typeSwitchVar
-      - underef
-      - unlambda
       - unnecessaryBlock
-      - unslice
-      - valSwap
-      - wrapperFunc
   
   misspell:
     # 美式英语
@@ -195,7 +155,16 @@ issues:
   max-issues-per-linter: 0
   # 每个文件修复相同问题的最大数量
   max-same-issues: 0
-  
+
+  # 排除特定目录
+  exclude-dirs:
+    - vendor
+    - data
+
+  # 排除特定文件
+  exclude-files:
+    - '.*_test\.go$'
+
   # 排除特定问题
   exclude-rules:
     # 排除测试文件中的一些问题

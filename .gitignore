@@ -32,6 +32,7 @@ rss.opml
 
 # 报告文件
 report-*.md
+*.md
 
 #数据文件
 articles.db
