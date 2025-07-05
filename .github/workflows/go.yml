@@ -82,6 +82,16 @@ jobs:
             ~/go/pkg/mod
           key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
 
+      - name: Ensure build.sh is executable
+        run: |
+          if [ ! -x build.sh ]; then
+            chmod +x build.sh
+          fi
+
+      - name: Build multi-platform binaries
+        run: |
+          set -e
+          ./build.sh
 
       - name: Archive binaries
         uses: actions/upload-artifact@v4
