@@ -13,11 +13,13 @@ type ProcessParams struct {
 
 // DeepseekConfig 包含Deepseek API的配置信息
 type DeepseekConfig struct {
-	APIKey    string // API密钥
-	Model     string // 模型名称
-	MaxTokens int    // 最大令牌数
-	MaxCalls  int    // 最大调用次数
-	APIUrl    string // API接口地址
+	APIKey      string // API密钥
+	Model       string // 模型名称
+	MaxTokens   int    // 最大令牌数
+	MaxCalls    int    // 最大调用次数
+	APIUrl      string // API接口地址
+	ReadTimeout int    // 读取超时时间（秒）
+	APITimeout  int    // API请求超时时间（秒）
 }
 
 // DatabaseConfig 包含数据库的配置信息

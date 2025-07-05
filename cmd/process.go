@@ -38,16 +38,39 @@ var processCmd = &cobra.Command{
 			concurrency = 5 // 默认5个并发
 		}
 
+		// 获取完整的RSS配置
+		maxRetries := viper.GetInt("rss.max_retries")
+		if maxRetries <= 0 {
+			maxRetries = 3 // 默认3次重试
+		}
+
+		responseTimeout := viper.GetInt("rss.response_timeout")
+		if responseTimeout <= 0 {
+			responseTimeout = 120 // 默认120秒
+		}
+
+		overallTimeout := viper.GetInt("rss.overall_timeout")
+		if overallTimeout <= 0 {
+			overallTimeout = 160 // 默认160秒
+		}
+
+		retryBackoffBase := viper.GetInt("rss.retry_backoff_base")
+		if retryBackoffBase <= 0 {
+			retryBackoffBase = 1 // 默认1秒
+		}
+
 		params := model.ProcessParams{
 			OpmlFile:   viper.GetString("rss.opml_file"),
 			OutputFile: outputFile,
 			DaysBack:   viper.GetInt("rss.days_back"),
 			DeepseekConfig: model.DeepseekConfig{
-				APIKey:    viper.GetString("deepseek.api_key"),
-				Model:     viper.GetString("deepseek.model"),
-				MaxTokens: viper.GetInt("deepseek.max_tokens"),
-				MaxCalls:  viper.GetInt("deepseek.max_calls"),
-				APIUrl:    viper.GetString("deepseek.api_url"),
+				APIKey:      viper.GetString("deepseek.api_key"),
+				Model:       viper.GetString("deepseek.model"),
+				MaxTokens:   viper.GetInt("deepseek.max_tokens"),
+				MaxCalls:    viper.GetInt("deepseek.max_calls"),
+				APIUrl:      viper.GetString("deepseek.api_url"),
+				ReadTimeout: viper.GetInt("deepseek.read_timeout"),
+				APITimeout:  viper.GetInt("deepseek.api_timeout"),
 			},
 			PromptTemplate: viper.GetString("analysis.prompt_template"),
 			DatabaseConfig: model.DatabaseConfig{
@@ -55,8 +78,12 @@ var processCmd = &cobra.Command{
 				FilePath: viper.GetString("database.file_path"),
 			},
 			RssConfig: model.RssConfig{
-				Timeout:     timeout,
-				Concurrency: concurrency,
+				Timeout:          timeout,
+				Concurrency:      concurrency,
+				MaxRetries:       maxRetries,
+				ResponseTimeout:  responseTimeout,
+				OverallTimeout:   overallTimeout,
+				RetryBackoffBase: retryBackoffBase,
 			},
 		}
 

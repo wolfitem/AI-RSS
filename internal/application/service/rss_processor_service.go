@@ -233,8 +233,12 @@ func (s *rssProcessorService) processArticleContent(article model.Article, confi
 		logger.Debug("文章内容过长，进行摘要处理", "title", article.Title, "content_length", len(content))
 		summary, err := s.summarizeContent(content, config)
 		if err != nil {
-			logger.Error("摘要处理失败，使用原始内容", "title", article.Title, "error", err)
-			// 使用原始内容继续处理
+			logger.Error("摘要处理失败，使用降级策略", "title", article.Title, "error", err)
+			// 降级策略：截取前500字符作为摘要
+			if len(content) > 500 {
+				content = content[:500] + "..."
+				logger.Info("使用截取策略作为降级方案", "title", article.Title, "truncated_length", len(content))
+			}
 		} else {
 			logger.Debug("摘要处理成功", "summary", summary, "summary_length", len(summary))
 			content = summary
@@ -306,9 +310,15 @@ func (s *rssProcessorService) processAPIResponse(responseBody []byte, responsePr
 }
 
 // readAPIResponse 读取API响应
-func (s *rssProcessorService) readAPIResponse(resp *http.Response) ([]byte, error) {
+func (s *rssProcessorService) readAPIResponse(resp *http.Response, config model.DeepseekConfig) ([]byte, error) {
+	// 使用配置中的超时时间，如果没有配置则使用默认值
+	readTimeout := 120 * time.Second
+	if config.ReadTimeout > 0 {
+		readTimeout = time.Duration(config.ReadTimeout) * time.Second
+	}
+
 	// 创建一个带有超时的上下文，用于控制整个读取过程
-	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), readTimeout)
 	defer cancel() // 确保资源被释放
 
 	responseBodyChan := make(chan []byte, 1)
@@ -471,12 +481,18 @@ func (s *rssProcessorService) prepareDeepseekRequest(prompt string, config model
 }
 
 // sendDeepseekRequest 发送Deepseek API请求
-func (s *rssProcessorService) sendDeepseekRequest(req *http.Request, apiURL string) (string, error) {
-	// 发送请求，使用更合理的超时时间
+func (s *rssProcessorService) sendDeepseekRequest(req *http.Request, apiURL string, config model.DeepseekConfig) (string, error) {
+	// 使用配置中的超时时间，如果没有配置则使用默认值
+	apiTimeout := 45 * time.Second
+	if config.APITimeout > 0 {
+		apiTimeout = time.Duration(config.APITimeout) * time.Second
+	}
+
+	// 发送请求，使用配置的超时时间
 	client := &http.Client{
-		Timeout: 45 * time.Second, // 增加超时时间
+		Timeout: apiTimeout,
 		Transport: &http.Transport{
-			ResponseHeaderTimeout: 30 * time.Second,
+			ResponseHeaderTimeout: apiTimeout / 2,
 			ExpectContinueTimeout: 10 * time.Second,
 			TLSHandshakeTimeout:   15 * time.Second,
 			DisableKeepAlives:     false,
@@ -499,13 +515,20 @@ func (s *rssProcessorService) sendDeepseekRequest(req *http.Request, apiURL stri
 				backoffTime = 10 * time.Second // 最大退避10秒
 			}
 			logger.Info("API请求重试等待", "retry_count", retryCount, "backoff_time_ms", backoffTime.Milliseconds())
+
+			// 检查是否是可重试的错误
+			if lastErr != nil && !s.isRetryableError(lastErr) {
+				logger.Warn("遇到不可重试的错误，停止重试", "error", lastErr)
+				break
+			}
+
 			time.Sleep(backoffTime)
 		}
 
 		start := time.Now()
 
 		// 为每次请求创建新的上下文，避免使用已取消的上下文
-		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), apiTimeout)
 
 		// 创建新的请求，使用新的上下文
 		reqWithCtx := req.WithContext(ctx)
@@ -536,7 +559,7 @@ func (s *rssProcessorService) sendDeepseekRequest(req *http.Request, apiURL stri
 		}
 
 		// 读取响应
-		responseBody, err := s.readAPIResponse(resp)
+		responseBody, err := s.readAPIResponse(resp, config)
 		if err != nil {
 			return "", err
 		}
@@ -574,6 +597,49 @@ func (s *rssProcessorService) sendDeepseekRequest(req *http.Request, apiURL stri
 	return "", nil
 }
 
+// isRetryableError 判断错误是否可重试
+func (s *rssProcessorService) isRetryableError(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	errStr := err.Error()
+
+	// 网络相关错误通常可重试
+	retryableErrors := []string{
+		"context deadline exceeded",
+		"timeout",
+		"connection reset",
+		"connection refused",
+		"temporary failure",
+		"network is unreachable",
+		"no such host",
+	}
+
+	for _, retryableErr := range retryableErrors {
+		if strings.Contains(errStr, retryableErr) {
+			return true
+		}
+	}
+
+	// 认证错误不可重试
+	nonRetryableErrors := []string{
+		"401",
+		"403",
+		"invalid api key",
+		"unauthorized",
+	}
+
+	for _, nonRetryableErr := range nonRetryableErrors {
+		if strings.Contains(errStr, nonRetryableErr) {
+			return false
+		}
+	}
+
+	// 默认认为可重试
+	return true
+}
+
 // callDeepseekAPI 调用Deepseek API进行内容分析
 func (s *rssProcessorService) callDeepseekAPI(prompt string, config model.DeepseekConfig) (string, error) {
 	// 增加API调用计数
@@ -608,7 +674,7 @@ func (s *rssProcessorService) callDeepseekAPI(prompt string, config model.Deepse
 	}
 
 	// 发送请求
-	return s.sendDeepseekRequest(req, apiURL)
+	return s.sendDeepseekRequest(req, apiURL, config)
 }
 
 // generateReport 根据分析结果生成报告

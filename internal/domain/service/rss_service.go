@@ -115,7 +115,7 @@ func (s *rssService) FetchArticles(sources []model.RssSource, daysBack int, conf
 		go s.processSingleSource(source, cutoffDate, config, semaphore, resultChan)
 	}
 
-	// 收集结果
+	// 收集结果，带超时控制
 	articles := s.collectResults(sources, resultChan)
 	return articles, nil
 }
