@@ -566,7 +566,24 @@ func (s *rssProcessorService) processResponse(resp *http.Response, config model.
 	if resp.StatusCode != http.StatusOK {
 		return "", s.handleAPIError(resp.StatusCode, responseBody, requestDuration)
 	}
-			logger.Info("API请求重试等待", "retry_count", retryCount, "backoff_time_ms", backoffTime.Milliseconds())
+
+	// 记录原始响应内容（仅记录预览，避免日志过大）
+	responsePreview := string(responseBody)
+	if len(responsePreview) > 200 {
+		responsePreview = responsePreview[:200] + "..."
+	}
+	logger.Debug("收到API响应", "status_code", resp.StatusCode, "response_preview", responsePreview, "duration_ms", requestDuration.Milliseconds())
+
+	// 处理API响应
+	content, err := s.processAPIResponse(responseBody, responsePreview)
+	if err != nil {
+		return "", err
+	}
+
+	// 记录成功的API调用
+	logger.Info("Deepseek API调用成功", "duration_ms", requestDuration.Milliseconds(), "content_length", len(content))
+	return content, nil
+}
 
 			// 检查是否是可重试的错误
 			if lastErr != nil && !s.isRetryableError(lastErr) {
