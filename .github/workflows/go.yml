@@ -1,7 +1,4 @@
-# This workflow will build a golang project
-# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-go
-
-name: Go
+name: Go Build and Test
 
 on:
   push:
@@ -10,19 +7,47 @@ on:
     branches: [ "main" ]
 
 jobs:
-
-  build:
+  test:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v4
+    - name: Checkout code
+      uses: actions/checkout@v4
 
-    - name: Set up Go
+    - name: Setup Go
       uses: actions/setup-go@v4
       with:
         go-version: '1.20'
 
-    - name: Build
-      run: go build -v ./...
+    - name: Run tests
+      run: go test -v -race -coverprofile=coverage.out ./...
 
-    - name: Test
-      run: go test -v ./...
+    - name: Upload coverage report
+      uses: actions/upload-artifact@v3
+      with:
+        name: coverage-report
+        path: coverage.out
+
+  build:
+    needs: test  # 依赖测试任务，只有测试通过才构建
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Setup Go
+      uses: actions/setup-go@v4
+      with:
+        go-version: '1.20'
+
+    - name: Make build script executable
+      run: chmod +x build.sh  # 确保构建脚本有执行权限
+
+    - name: Build multi-platform binaries
+      run: ./build.sh  # 执行多平台构建脚本
+
+    - name: Archive binaries
+      uses: actions/upload-artifact@v3
+      with:
+        name: release-binaries
+        path: bin/  # 假设build.sh输出到bin目录
+        retention-days: 7
