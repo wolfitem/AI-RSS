@@ -311,44 +311,68 @@ func (s *rssProcessorService) processAPIResponse(responseBody []byte, responsePr
 
 // readAPIResponse 读取API响应
 func (s *rssProcessorService) readAPIResponse(resp *http.Response, config model.DeepseekConfig) ([]byte, error) {
-	// 使用配置中的超时时间，如果没有配置则使用默认值
+	readTimeout := s.getReadTimeout(config)
+	ctx, cancel := context.WithTimeout(context.Background(), readTimeout)
+	defer cancel()
+
+	return s.readResponseWithTimeout(ctx, resp)
+}
+
+// getReadTimeout 获取读取超时时间
+func (s *rssProcessorService) getReadTimeout(config model.DeepseekConfig) time.Duration {
 	readTimeout := 120 * time.Second
 	if config.ReadTimeout > 0 {
 		readTimeout = time.Duration(config.ReadTimeout) * time.Second
 	}
+	return readTimeout
+}
 
-	// 创建一个带有超时的上下文，用于控制整个读取过程
-	ctx, cancel := context.WithTimeout(context.Background(), readTimeout)
-	defer cancel() // 确保资源被释放
-
+// readResponseWithTimeout 在超时控制下读取响应
+func (s *rssProcessorService) readResponseWithTimeout(ctx context.Context, resp *http.Response) ([]byte, error) {
 	responseBodyChan := make(chan []byte, 1)
 	readErrChan := make(chan error, 1)
 
 	go func() {
-		// 使用带缓冲的读取方式，避免大响应体导致的内存问题
-		const maxSize = 10 * 1024 * 1024                 // 10MB 最大响应大小限制
-		buf := bytes.NewBuffer(make([]byte, 0, 32*1024)) // 32KB 初始缓冲区
+		body, err := s.readResponseBody(resp)
+		if err != nil {
+			readErrChan <- err
+			return
+		}
+		responseBodyChan <- body
+	}()
 
-		// 分块读取响应体，添加超时控制
-		chunk := make([]byte, 4096)
-		totalSize := 0
+	select {
+	case <-ctx.Done():
+		return nil, fmt.Errorf("读取API响应超时: %w", ctx.Err())
+	case err := <-readErrChan:
+		return nil, err
+	case body := <-responseBodyChan:
+		return body, nil
+	}
+}
 
-		// 使用更小的读取超时，避免单次读取阻塞太久
-		readTimeout := 15 * time.Second
-		for {
-			// 检查上下文是否已取消
-			select {
-			case <-ctx.Done():
-				// 上下文已取消，可能是因为超时
-				if ctx.Err() == context.DeadlineExceeded {
-					readErrChan <- fmt.Errorf("读取响应超时: %w", ctx.Err())
-				} else {
-					readErrChan <- ctx.Err()
-				}
-				return
-			default:
-				// 继续执行
-			}
+// readResponseBody 读取响应体内容
+func (s *rssProcessorService) readResponseBody(resp *http.Response) ([]byte, error) {
+	// 使用带缓冲的读取方式，避免大响应体导致的内存问题
+	const maxSize = 10 * 1024 * 1024 // 10MB 最大响应大小限制
+
+	// 使用 LimitReader 限制读取大小
+	limitedReader := io.LimitReader(resp.Body, maxSize+1)
+
+	// 读取响应体
+	body, err := io.ReadAll(limitedReader)
+	if err != nil {
+		return nil, fmt.Errorf("读取响应体失败: %w", err)
+	}
+
+	// 检查是否超过大小限制
+	if len(body) > maxSize {
+		return nil, fmt.Errorf("响应体过大，超过%d字节限制", maxSize)
+	}
+
+	logger.Debug("成功读取API响应", "response_size_bytes", len(body))
+	return body, nil
+}
 
 			// 设置单次读取的超时
 			readCtx, readCancel := context.WithTimeout(ctx, readTimeout)
@@ -482,14 +506,19 @@ func (s *rssProcessorService) prepareDeepseekRequest(prompt string, config model
 
 // sendDeepseekRequest 发送Deepseek API请求
 func (s *rssProcessorService) sendDeepseekRequest(req *http.Request, apiURL string, config model.DeepseekConfig) (string, error) {
+	client := s.createHTTPClient(config)
+	return s.executeRequestWithRetry(req, client, config)
+}
+
+// createHTTPClient 创建配置好的HTTP客户端
+func (s *rssProcessorService) createHTTPClient(config model.DeepseekConfig) *http.Client {
 	// 使用配置中的超时时间，如果没有配置则使用默认值
 	apiTimeout := 45 * time.Second
 	if config.APITimeout > 0 {
 		apiTimeout = time.Duration(config.APITimeout) * time.Second
 	}
 
-	// 发送请求，使用配置的超时时间
-	client := &http.Client{
+	return &http.Client{
 		Timeout: apiTimeout,
 		Transport: &http.Transport{
 			ResponseHeaderTimeout: apiTimeout / 2,
@@ -499,7 +528,15 @@ func (s *rssProcessorService) sendDeepseekRequest(req *http.Request, apiURL stri
 			MaxIdleConnsPerHost:   10,
 		},
 	}
-	logger.Debug("发送Deepseek API请求", "url", apiURL, "timeout", "45s")
+}
+
+// executeRequestWithRetry 执行带重试的HTTP请求
+func (s *rssProcessorService) executeRequestWithRetry(req *http.Request, client *http.Client, config model.DeepseekConfig) (string, error) {
+	apiTimeout := 45 * time.Second
+	if config.APITimeout > 0 {
+		apiTimeout = time.Duration(config.APITimeout) * time.Second
+	}
+	logger.Debug("发送Deepseek API请求", "url", req.URL.String(), "timeout", apiTimeout.String())
 
 	// 实现智能的重试机制，使用指数退避策略
 	var resp *http.Response
@@ -510,7 +547,12 @@ func (s *rssProcessorService) sendDeepseekRequest(req *http.Request, apiURL stri
 	for retryCount := 0; retryCount < maxRetries; retryCount++ {
 		// 计算指数退避时间
 		if retryCount > 0 {
-			backoffTime := time.Duration(1<<uint(retryCount-1)) * time.Second
+			// 安全的指数退避计算，避免整数溢出
+			exponent := retryCount - 1
+			if exponent > 10 { // 限制指数避免溢出
+				exponent = 10
+			}
+			backoffTime := time.Duration(1<<exponent) * time.Second
 			if backoffTime > 10*time.Second {
 				backoffTime = 10 * time.Second // 最大退避10秒
 			}
@@ -549,17 +591,15 @@ func (s *rssProcessorService) sendDeepseekRequest(req *http.Request, apiURL stri
 			continue
 		}
 
-		// 确保响应体被关闭
-		if resp != nil {
-			defer func(body io.ReadCloser) {
-				if err := body.Close(); err != nil {
-					logger.Warn("关闭响应体失败", "error", err)
-				}
-			}(resp.Body)
-		}
-
 		// 读取响应
 		responseBody, err := s.readAPIResponse(resp, config)
+		// 立即关闭响应体，避免在循环中使用defer
+		if resp != nil && resp.Body != nil {
+			if closeErr := resp.Body.Close(); closeErr != nil {
+				logger.Warn("关闭响应体失败", "error", closeErr)
+			}
+		}
+
 		if err != nil {
 			return "", err
 		}
