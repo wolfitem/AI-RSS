@@ -6,48 +6,103 @@ on:
   pull_request:
     branches: [ "main" ]
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go-version: [1.20, 1.21, 1.22] # 可根据需要增减版本
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Setup Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: '1.20'
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: ${{ matrix.go-version }}
 
-    - name: Run tests
-      run: go test -v -race -coverprofile=coverage.out ./...
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ matrix.go-version }}-${{ hashFiles('**/go.sum') }}
 
-    - name: Upload coverage report
-      uses: actions/upload-artifact@v4
-      with:
-        name: coverage-report
-        path: coverage.out
+      - name: Run go fmt
+        run: |
+          fmt_output=$(go fmt ./...)
+          if [[ -n "$fmt_output" ]]; then
+            echo "以下文件未通过 go fmt 格式化:"
+            echo "$fmt_output"
+            exit 1
+          fi
+
+      - name: Run go vet
+        run: go vet ./...
+
+      - name: Run golint
+        run: |
+          go install golang.org/x/lint/golint@latest
+          golint_output=$(golint ./... || true)
+          if [[ -n "$golint_output" ]]; then
+            echo "golint 报告如下:"
+            echo "$golint_output"
+            exit 1
+          fi
+
+      - name: Run tests with coverage
+        run: go test -v -race -coverprofile=coverage.out ./...
+
+      - name: Upload coverage report artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: coverage.out
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage.out
 
   build:
-    needs: test  # 依赖测试任务，只有测试通过才构建
+    needs: test
     runs-on: ubuntu-latest
     steps:
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout code
+        uses: actions/checkout@v4
 
-    - name: Setup Go
-      uses: actions/setup-go@v4
-      with:
-        go-version: '1.20'
+      - name: Set up Go
+        uses: actions/setup-go@v4
+        with:
+          go-version: '1.22' # 构建阶段一般只指定一个稳定版本
 
-    - name: Make build script executable
-      run: chmod +x build.sh  # 确保构建脚本有执行权限
+      - name: Cache Go modules
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
 
-    - name: Build multi-platform binaries
-      run: ./build.sh  # 执行多平台构建脚本
+      - name: Ensure build.sh is executable
+        run: |
+          if [ ! -x build.sh ]; then
+            chmod +x build.sh
+          fi
 
-    - name: Archive binaries
-      uses: actions/upload-artifact@v3
-      with:
-        name: release-binaries
-        path: bin/  # 假设build.sh输出到bin目录
-        retention-days: 7
+      - name: Build multi-platform binaries
+        run: |
+          set -e
+          ./build.sh
+
+      - name: Archive binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-binaries
+          path: bin/** # 支持多平台产物
+          retention-days: 7
