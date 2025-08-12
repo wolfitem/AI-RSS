@@ -26,17 +26,27 @@ type RssService interface {
 }
 
 // rssService 实现RssService接口
-type rssService struct{}
+type rssService struct {
+	validator *Validator
+}
 
 // NewRssService 创建一个新的RSS服务实例
 func NewRssService() RssService {
-	return &rssService{}
+	return &rssService{
+		validator: NewValidator(),
+	}
 }
 
 // ParseOpml 解析OPML文件并返回RSS源列表
 func (s *rssService) ParseOpml(opmlFilePath string) ([]model.RssSource, error) {
 	logger.Info("开始解析OPML文件", "file", opmlFilePath)
 	defer logger.TimeTrack("ParseOpml")()
+
+	// 验证文件路径安全性
+	if err := s.validator.ValidateFilePath(opmlFilePath); err != nil {
+		logger.Error("文件路径验证失败", "file", opmlFilePath, "error", err)
+		return nil, fmt.Errorf("文件路径验证失败: %w", err)
+	}
 
 	// 解析OPML文件
 	doc, err := opml.NewOPMLFromFile(opmlFilePath)
@@ -49,7 +59,7 @@ func (s *rssService) ParseOpml(opmlFilePath string) ([]model.RssSource, error) {
 	var sources []model.RssSource
 	for _, outline := range doc.Outlines() {
 		// 递归处理所有outline
-		sources = append(sources, extractSources(outline)...)
+		sources = append(sources, s.extractSources(outline)...)
 	}
 
 	logger.Info("OPML文件解析完成", "file", opmlFilePath, "sources_count", len(sources))
@@ -57,11 +67,17 @@ func (s *rssService) ParseOpml(opmlFilePath string) ([]model.RssSource, error) {
 }
 
 // extractSources 递归提取outline中的RSS源
-func extractSources(outline opml.Outline) []model.RssSource {
+func (s *rssService) extractSources(outline opml.Outline) []model.RssSource {
 	var sources []model.RssSource
 
 	// 如果当前outline有xmlUrl属性，则它是一个RSS源
 	if outline.XMLURL != "" {
+		// 验证URL格式和安全性
+		if err := s.validator.ValidateURL(outline.XMLURL); err != nil {
+			logger.Error("跳过无效的RSS URL", "title", outline.Title, "url", outline.XMLURL, "error", err)
+			return sources // 跳过无效的源
+		}
+
 		sources = append(sources, model.RssSource{
 			Title:  outline.Title,
 			XMLUrl: outline.XMLURL,
@@ -70,7 +86,7 @@ func extractSources(outline opml.Outline) []model.RssSource {
 
 	// 递归处理子outline
 	for _, child := range outline.Outlines {
-		sources = append(sources, extractSources(child)...)
+		sources = append(sources, s.extractSources(child)...)
 	}
 
 	return sources
