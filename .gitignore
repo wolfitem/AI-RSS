@@ -21,6 +21,7 @@ ai-rss
 .vscode/
 *.swp
 *.swo
+.claude/
 
 # 日志文件
 /logs/
@@ -29,6 +30,11 @@ ai-rss
 # 本地配置文件，可能包含敏感信息
 config.yaml
 rss.opml 
+
+# 环境变量文件（可能包含API密钥等敏感信息）
+.env
+.env.local
+.env.*.local
 
 # 报告文件
 report-*.md

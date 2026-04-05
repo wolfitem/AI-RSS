@@ -28,6 +28,10 @@ type RssProcessorService interface {
 // rssProcessorService 实现RssProcessorService接口
 type rssProcessorService struct {
 	rssService service.RssService
+	// 验证器用于安全输入验证
+	validator    *service.Validator
+	// 缓存服务
+	cacheService service.CacheService
 	// 用于跟踪API调用次数的变量
 	apiCallCount int
 	// 数据库相关
@@ -39,6 +43,7 @@ type rssProcessorService struct {
 func NewRssProcessorService() RssProcessorService {
 	return &rssProcessorService{
 		rssService:   service.NewRssService(),
+		validator:    service.NewValidator(),
 		apiCallCount: 0,
 	}
 }
@@ -122,8 +127,25 @@ func (s *rssProcessorService) processArticleTask(article model.Article, params m
 		return model.AnalysisResult{}, true
 	}
 
-	// 如果启用了数据库，检查文章是否已存在
-	if params.DatabaseConfig.Enabled && s.articleRepo != nil {
+	// 构建配置哈希用于缓存匹配
+	configHash := fmt.Sprintf("%s%d%d", 
+		params.DeepseekConfig.Model,
+		params.DeepseekConfig.MaxTokens,
+		params.DeepseekConfig.MaxCalls,
+	)
+
+	// 如果启用了缓存，尝试从缓存获取
+	if params.DatabaseConfig.Enabled && s.cacheService != nil {
+		cachedResult, err := s.cacheService.GetCachedResult(article.Content, configHash)
+		if err != nil {
+			logger.Error("获取缓存失败", "title", article.Title, "error", err)
+		} else if cachedResult != nil {
+			logger.Info("使用缓存结果", "title", article.Title, "hash", cachedResult.Link[:12])
+			cachedResult.Link = article.Link // 更新原始链接
+			return *cachedResult, false
+		}
+
+		// 检查文章是否已存在（存储的已分析文章而非缓存）
 		exists, err := s.articleRepo.ArticleExists(article.Link)
 		if err != nil {
 			logger.Error("检查文章是否存在失败", "title", article.Title, "error", err)
@@ -136,10 +158,11 @@ func (s *rssProcessorService) processArticleTask(article model.Article, params m
 				logger.Info("已从数据库获取文章", "title", existingArticle.Title)
 				return *existingArticle, false
 			}
-			// 如果获取失败，继续正常处理
+			// 如果获取失败，继续缓存处理
 		}
 	}
 
+	// 处理文章内容并生成摘要
 	result := model.AnalysisResult{
 		Title:    article.Title,
 		Summary:  s.processArticleContent(article, params.DeepseekConfig),
@@ -153,6 +176,15 @@ func (s *rssProcessorService) processArticleTask(article model.Article, params m
 	category := s.extractCategoryFromContent(article.Content)
 	if category != "" {
 		result.Category = category
+	}
+
+	// 保存缓存（如果启用）
+	if params.DatabaseConfig.Enabled && s.cacheService != nil {
+		go func() {
+			if err := s.cacheService.SetCachedResult(article.Content, configHash, &result, 7*24*time.Hour); err != nil {
+				logger.Warn("保存缓存失败", "title", article.Title, "error", err)
+			}
+		}()
 	}
 
 	logger.Debug("处理后的文章内容", "result.Summary", result.Summary, "content_length", len(result.Summary))
@@ -430,9 +462,15 @@ func (s *rssProcessorService) prepareDeepseekRequest(prompt string, config model
 		return nil, "", fmt.Errorf("创建HTTP请求失败: %w", err)
 	}
 
+	// 获取并验证API密钥
+	apiKey, err := s.validator.GetAPIKey(&config)
+	if err != nil {
+		return nil, "", fmt.Errorf("API密钥错误: %w", err)
+	}
+
 	// 设置请求头
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+config.APIKey)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
 
 	return req, apiURL, nil
 }
@@ -640,14 +678,15 @@ func (s *rssProcessorService) callDeepseekAPI(prompt string, config model.Deepse
 		return "", nil
 	}
 
-	// 检查API密钥是否配置
-	if config.APIKey == "" {
-		logger.Error("未配置Deepseek API密钥")
-		return "", fmt.Errorf("未配置Deepseek API密钥")
+	// 安全获取API密钥
+	apiKey, err := s.validator.GetAPIKey(&config)
+	if err != nil {
+		logger.Error("获取Deepseek API密钥失败", "error", err)
+		return "", fmt.Errorf("API密钥错误: %w", err)
 	}
 
 	// 记录API请求参数（不包含完整的API密钥）
-	apiKeyMasked := "****" + config.APIKey[len(config.APIKey)-4:]
+	apiKeyMasked := "****" + apiKey[len(apiKey)-4:]
 	logger.Debug("Deepseek API请求参数",
 		"model", config.Model,
 		"max_tokens", config.MaxTokens,
@@ -782,8 +821,9 @@ func (s *rssProcessorService) initDatabase(config model.DatabaseConfig) error {
 		return fmt.Errorf("初始化数据库失败: %w", err)
 	}
 
-	// 创建文章存储库
+	// 创建文章存储库和缓存服务
 	s.articleRepo = database.NewSQLiteArticleRepository(s.db)
-	logger.Info("数据库和文章存储库初始化成功")
+	s.cacheService = service.NewCacheService(s.db)
+	logger.Info("数据库、文章存储库和缓存服务初始化成功")
 	return nil
 }
