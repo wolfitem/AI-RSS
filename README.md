@@ -113,7 +113,7 @@ ai-rss process --config=custom_config.yaml
 ```yaml
 # 日志配置
 logger:
-  level: "debug"           # 日志级别: debug, info, warn, error, dpanic, panic, fatal
+  level: "error"           # 日志级别: debug, info, warn, error, dpanic, panic, fatal
   console: true            # 是否输出到控制台
   file_path: "logs/ai-rss.log" # 日志文件路径
   max_size: 100            # 单个日志文件最大大小，单位MB
